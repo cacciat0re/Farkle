@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 )
 
@@ -59,8 +60,8 @@ func (c *Client) dispatch(m ClientMessage) {
 	switch m.Type {
 	case "JOIN_ROOM":
 		action = func() { c.Room.HandleJoin(c, m) }
-	case "START_GAME":
-		action = func() { c.Room.HandleStart(c, m) }
+	case "PLAYER_READY":
+		action = func() { c.Room.HandleReady(c, m) }
 	case "ROLL_DICE":
 		action = func() { c.Room.HandleRollAgain(c, m) }
 	case "ROLL_RESULT":
@@ -69,6 +70,10 @@ func (c *Client) dispatch(m ClientMessage) {
 		action = func() { c.Room.HandleKeep(c, m) }
 	case "BANK_SCORE":
 		action = func() { c.Room.HandleBank(c, m) }
+	case "REMATCH_READY":
+		action = func() { c.Room.HandleRematchReady(c, m) }
+	case "LEAVE_TABLE":
+		action = func() { c.Room.HandleLeave(c, m) }
 	default:
 		return
 	}
@@ -105,16 +110,17 @@ func (c *Client) writePump() {
 }
 
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
-	roomID := r.URL.Query().Get("room")
-	if roomID == "" {
-		roomID = "tavern"
+	tableID := chi.URLParam(r, "tableId")
+	room := hub.GetRoom(tableID)
+	if room == nil {
+		http.Error(w, `{"error":"桌子不存在"}`, http.StatusNotFound)
+		return
 	}
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Println("upgrade:", err)
 		return
 	}
-	room := hub.GetOrCreateRoom(roomID)
 	client := &Client{Room: room, Conn: conn, Send: make(chan []byte, 64)}
 	room.Register <- client
 

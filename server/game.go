@@ -100,10 +100,145 @@ func scoreDice(dice []int) ScoreResult {
 	return ScoreResult{BaseScore: score}
 }
 
-// validSelection 验证玩家锁定的子集是否可得分，并返回其得分
+// removeFirstN 从 dice 中移除 n 个值为 face 的骰子
+func removeFirstN(dice []int, face, n int) []int {
+	rest := make([]int, 0, len(dice))
+	removed := 0
+	for _, d := range dice {
+		if d == face && removed < n {
+			removed++
+			continue
+		}
+		rest = append(rest, d)
+	}
+	return rest
+}
+
+// isValidKeep 判断一组骰子能否作为合法锁定：每颗骰子都必须参与得分，
+// 不允许夹带不得分的散骰（如 [5,5,5,2] 非法，[5,5,5] 合法）。
+func isValidKeep(dice []int) bool {
+	if len(dice) == 0 {
+		return false
+	}
+	_, ok := scoreFull(dice)
+	return ok
+}
+
+// specialScore 若 dice 恰好是特殊组合则返回其分数
+func specialScore(dice []int) (int, bool) {
+	n := len(dice)
+	counts := make([]int, 7)
+	for _, d := range dice {
+		counts[d]++
+	}
+	nonZero := 0
+	for i := 1; i <= 6; i++ {
+		if counts[i] > 0 {
+			nonZero++
+		}
+	}
+	if n == 6 && nonZero == 6 {
+		return 1500, true
+	}
+	if n == 6 {
+		pairs, triples := 0, 0
+		for i := 1; i <= 6; i++ {
+			if counts[i] == 2 {
+				pairs++
+			}
+			if counts[i] == 3 {
+				triples++
+			}
+		}
+		if pairs == 3 {
+			return 1500, true
+		}
+		if triples == 2 {
+			return 2500, true
+		}
+	}
+	if n == 5 && nonZero == 5 {
+		if counts[1] == 1 && counts[2] == 1 && counts[3] == 1 && counts[4] == 1 && counts[5] == 1 {
+			return 1500, true
+		}
+		if counts[2] == 1 && counts[3] == 1 && counts[4] == 1 && counts[5] == 1 && counts[6] == 1 {
+			return 1500, true
+		}
+	}
+	return 0, false
+}
+
+// scoreFull 计算一组骰子完整分解后的最高总分。
+// ok=false 表示存在无法参与得分的骰子（调用方应拒绝该组合）。
+func scoreFull(dice []int) (int, bool) {
+	if len(dice) == 0 {
+		return 0, true
+	}
+	if s, ok := specialScore(dice); ok {
+		return s, true
+	}
+	counts := make([]int, 7)
+	for _, d := range dice {
+		counts[d]++
+	}
+	best := 0
+	found := false
+	try := func(rest []int, gained int) {
+		if r, ok := scoreFull(rest); ok && (!found || r+gained > best) {
+			best = r + gained
+			found = true
+		}
+	}
+	if counts[1] > 0 {
+		try(removeFirstN(dice, 1, 1), 100)
+	}
+	if counts[5] > 0 {
+		try(removeFirstN(dice, 5, 1), 50)
+	}
+	for face := 1; face <= 6; face++ {
+		if counts[face] < 3 {
+			continue
+		}
+		for n := 3; n <= counts[face]; n++ {
+			base := face * 100
+			if face == 1 {
+				base = 1000
+			}
+			mult := 1
+			for e := n - 3; e > 0; e-- {
+				mult *= 2
+			}
+			try(removeFirstN(dice, face, n), base*mult)
+		}
+	}
+	return best, found
+}
+
+// bestScore 在 dice 的所有合法锁定子集中取最高得分；无合法子集返回 0（即 Farkle）
+func bestScore(dice []int) int {
+	best := 0
+	n := len(dice)
+	for mask := 1; mask < (1 << n); mask++ {
+		sub := make([]int, 0, n)
+		for i := 0; i < n; i++ {
+			if mask&(1<<i) != 0 {
+				sub = append(sub, dice[i])
+			}
+		}
+		s, ok := scoreFull(sub)
+		if !ok {
+			continue
+		}
+		if s > best {
+			best = s
+		}
+	}
+	return best
+}
+
+// validSelection 验证玩家锁定的子集是否合法（全部参与得分），并返回其总分
 func validSelection(selected []int) (int, bool) {
-	res := scoreDice(selected)
-	return res.BaseScore, !res.IsFarkle
+	return scoreFull(selected)
 }
 
 // maxScoringDice 判断散骰中最大可锁定数量（用于全锁后奖励再掷）

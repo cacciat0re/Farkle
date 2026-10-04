@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { ClientMessage, GameState, ServerMessage } from './protocol'
+import { selectableIndices } from './game/scoring'
 
 interface GameStore {
   // 连接信息
@@ -7,6 +8,9 @@ interface GameStore {
   myName: string
   roomId: string
   connected: boolean
+  joiningTableId: string | null
+  joinedAt: number | null
+  leaving: boolean
   error: string | null
 
   // 游戏状态（服务端权威：计分/回合/锁定；点数来自本地物理动画）
@@ -20,18 +24,43 @@ interface GameStore {
   settledValues: (number | null)[] // 各骰子物理停稳后的实际点数
 
   // actions
-  join: (name: string, roomId: string) => void
-  startGame: () => void
+  join: (tableId: string) => void
+  leaveTable: () => void
+  playerReady: () => void
   rollDice: () => void
   reportDieSettled: (index: number, value: number) => void
   toggleSelect: (index: number) => void
   clearSelection: () => void
   keepSelected: () => void
   bank: () => void
+  rematchReady: () => void
   dismissError: () => void
 }
 
 let ws: WebSocket | null = null
+
+function createGuest() {
+  const id = crypto.randomUUID()
+  const suffix = id.replace(/-/g, '').slice(0, 4).toUpperCase()
+  return { id, name: `traveler${suffix}` }
+}
+
+const guest = createGuest()
+
+const emptyRoomState = {
+  state: null,
+  roomId: '',
+  connected: false,
+  joiningTableId: null,
+  joinedAt: null,
+  leaving: false,
+  selected: [],
+  rollingCount: 0,
+  rollSeq: 0,
+  rollSeed: 0,
+  settledValues: [],
+  error: null,
+}
 
 function send(msg: ClientMessage) {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -40,10 +69,13 @@ function send(msg: ClientMessage) {
 }
 
 export const useGameStore = create<GameStore>((set, get) => ({
-  myId: crypto.randomUUID(),
-  myName: '',
-  roomId: 'tavern',
+  myId: guest.id,
+  myName: guest.name,
+  roomId: '',
   connected: false,
+  joiningTableId: null,
+  joinedAt: null,
+  leaving: false,
   error: null,
   state: null,
   selected: [],
@@ -52,28 +84,44 @@ export const useGameStore = create<GameStore>((set, get) => ({
   rollSeed: 0,
   settledValues: [],
 
-  join: (name, roomId) => {
-    const { myId } = get()
-    set({ myName: name, roomId, error: null })
+  join: (tableId) => {
+    const { myId, myName } = get()
+    if (!tableId) return
+    set({
+      roomId: tableId,
+      joiningTableId: tableId,
+      joinedAt: Date.now(),
+      leaving: false,
+      error: null,
+    })
     if (ws) ws.close()
     const proto = location.protocol === 'https:' ? 'wss' : 'ws'
-    // vite 开发服务器（5173）直连 8080；其余（含 docker/nginx 生产）走同源 /ws 反代
-    const base =
-      location.port === '5173'
-        ? `${proto}://${location.hostname}:8080`
-        : `${proto}://${location.host}`
-    ws = new WebSocket(`${base}/ws?room=${encodeURIComponent(roomId)}`)
+    // Vite 开发服务器和生产 nginx 都反代 /api 与 /ws，浏览器侧始终使用同源地址
+    ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(tableId)}`)
 
     ws.onopen = () => {
       set({ connected: true })
-      send({ type: 'JOIN_ROOM', playerId: myId, name, roomId })
+      send({ type: 'JOIN_ROOM', playerId: myId, name: myName, roomId: tableId })
     }
-    ws.onclose = () => set({ connected: false })
-    ws.onerror = () => set({ connected: false })
+    ws.onclose = () => {
+      if (get().leaving) {
+        ws = null
+        set(emptyRoomState)
+      } else {
+        set((s) => ({
+          connected: false,
+          joiningTableId: s.state ? s.joiningTableId : null,
+        }))
+      }
+    }
+    ws.onerror = () => set({ connected: false, joiningTableId: null, error: '无法连接到牌桌服务' })
     ws.onmessage = (ev) => {
       const msg = JSON.parse(ev.data as string) as ServerMessage
       if (msg.type === 'ERROR') {
-        set({ error: msg.error ?? '未知错误' })
+        set({ error: msg.error ?? '未知错误', joiningTableId: null, leaving: false })
+      } else if (msg.type === 'ROOM_LEFT') {
+        ws = null
+        set(emptyRoomState)
       } else if (msg.type === 'ROLL_REQUESTED') {
         // 服务端请求投掷：roll 字段为 [骰子数量, 种子]
         const count = msg.roll?.[0] ?? 6
@@ -92,6 +140,7 @@ export const useGameStore = create<GameStore>((set, get) => ({
           const myTurn = msg.state.players[msg.state.currentTurn]?.id === me
           set((s) => ({
             state: msg.state!,
+            joiningTableId: null,
             selected: myTurn ? s.selected : [],
           }))
         }
@@ -99,9 +148,21 @@ export const useGameStore = create<GameStore>((set, get) => ({
     }
   },
 
-  startGame: () => {
+  leaveTable: () => {
+    const { state, myId, roomId, leaving } = get()
+    if (state?.phase === 'waiting' && !leaving) {
+      send({ type: 'LEAVE_TABLE', playerId: myId, roomId })
+      set({ leaving: true })
+      return
+    }
+    if (ws) ws.close()
+    ws = null
+    set(emptyRoomState)
+  },
+
+  playerReady: () => {
     const { myId, roomId } = get()
-    send({ type: 'START_GAME', playerId: myId, roomId })
+    send({ type: 'PLAYER_READY', playerId: myId, roomId })
   },
 
   rollDice: () => {
@@ -126,10 +187,18 @@ export const useGameStore = create<GameStore>((set, get) => ({
 
   toggleSelect: (index) => {
     set((s) => {
+      const state = s.state
+      if (!state || state.phase !== 'scoring') return {}
+      if (state.players[state.currentTurn]?.id !== s.myId) return {}
+      if (s.settledValues[index] == null) return {}
+
       const idx = s.selected.indexOf(index)
       if (idx >= 0) {
         return { selected: s.selected.filter((i) => i !== index) }
       }
+
+      const allowed = selectableIndices(s.settledValues, s.selected)
+      if (!allowed.has(index)) return {}
       return { selected: [...s.selected, index] }
     })
   },
@@ -151,6 +220,11 @@ export const useGameStore = create<GameStore>((set, get) => ({
   bank: () => {
     const { myId, roomId } = get()
     send({ type: 'BANK_SCORE', playerId: myId, roomId })
+  },
+
+  rematchReady: () => {
+    const { myId, roomId } = get()
+    send({ type: 'REMATCH_READY', playerId: myId, roomId })
   },
 
   dismissError: () => set({ error: null }),

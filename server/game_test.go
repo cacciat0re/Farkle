@@ -35,10 +35,47 @@ func TestScoreDice(t *testing.T) {
 }
 
 func TestValidSelection(t *testing.T) {
-	if _, ok := validSelection([]int{2, 3}); ok {
-		t.Error("expected [2 3] to be invalid")
+	// 夹带不得分散骰 → 非法
+	for _, bad := range [][]int{
+		{2, 3}, {5, 5, 5, 2}, {1, 2}, {1, 1, 1, 4}, {2, 2, 2, 3, 3},
+	} {
+		if _, ok := validSelection(bad); ok {
+			t.Errorf("expected %v to be invalid keep", bad)
+		}
 	}
-	if s, ok := validSelection([]int{1, 1, 5}); !ok || s != 250 {
-		t.Errorf("expected [1 1 5] = 250, got %d %v", s, ok)
+	// 合法锁定与得分
+	cases := []struct {
+		keep []int
+		want int
+	}{
+		{[]int{1, 1, 5}, 250},
+		{[]int{5, 5, 5}, 500},
+		{[]int{1, 1, 1, 1, 5, 5}, 2100},        // 四条1 + 两颗5
+		{[]int{1, 2, 3, 4, 5, 5}, 1550},        // 1-5顺子 + 单5
+		{[]int{1, 2, 3, 4, 5, 6}, 1500},        // 顺子
+		{[]int{2, 2, 2, 4, 4, 4}, 2500},        // 两三条
+		{[]int{1, 1, 2, 2, 3, 3}, 1500},        // 三对
+		{[]int{1, 1, 1, 5}, 1050},              // 三条1 + 单5
+		{[]int{2, 2, 2, 2}, 400},               // 四条2
+	}
+	for _, c := range cases {
+		got, ok := validSelection(c.keep)
+		if !ok || got != c.want {
+			t.Errorf("validSelection(%v) = %d,%v want %d", c.keep, got, ok, c.want)
+		}
+	}
+}
+
+func TestBestScore(t *testing.T) {
+	// Farkle 判定：整组无合法子集
+	if bestScore([]int{2, 3, 4, 6}) != 0 {
+		t.Error("[2 3 4 6] should be farkle")
+	}
+	if bestScore([]int{2, 2, 4, 6}) != 0 {
+		t.Error("[2 2 4 6] should be farkle")
+	}
+	// 部分可得分
+	if bestScore([]int{1, 2, 3, 6}) != 100 {
+		t.Error("bestScore([1 2 3 6]) should be 100")
 	}
 }

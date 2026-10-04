@@ -1,46 +1,130 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useGameStore } from '../store'
 import { startAmbient } from '../audio'
 
+interface TableStatus {
+  id: string
+  name: string
+  maxPlayers: number
+  players: number
+  inGame: boolean
+}
+
+interface LobbyMessage {
+  type: 'TABLE_STATUS'
+  tables: TableStatus[]
+}
+
 export function Lobby() {
-  const joined = useGameStore((s) => s.state !== null)
+  const state = useGameStore((s) => s.state)
+  const myName = useGameStore((s) => s.myName)
+  const error = useGameStore((s) => s.error)
+  const dismissError = useGameStore((s) => s.dismissError)
   const join = useGameStore((s) => s.join)
-  const connected = useGameStore((s) => s.connected)
-  const [name, setName] = useState('')
-  const [room, setRoom] = useState('tavern')
+  const joiningTableId = useGameStore((s) => s.joiningTableId)
+  const [tables, setTables] = useState<TableStatus[]>([])
+  const [loading, setLoading] = useState(true)
 
-  if (joined) return null
+  useEffect(() => {
+    if (state) return
 
-  const submit = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!name.trim()) return
+    let closed = false
+    let retry = 0
+    let reconnectTimer: number | null = null
+    let socket: WebSocket | null = null
+
+    const connect = () => {
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws'
+      socket = new WebSocket(`${proto}://${location.host}/ws/lobby`)
+      socket.onopen = () => {
+        retry = 0
+      }
+      socket.onmessage = (event) => {
+        const message = JSON.parse(event.data as string) as LobbyMessage
+        if (message.type === 'TABLE_STATUS') {
+          setTables(message.tables)
+          setLoading(false)
+        }
+      }
+      socket.onclose = () => {
+        if (closed) return
+        const delay = Math.min(1000 * 2 ** retry, 10000)
+        retry += 1
+        reconnectTimer = window.setTimeout(connect, delay)
+      }
+    }
+
+    connect()
+    return () => {
+      closed = true
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer)
+      socket?.close()
+    }
+  }, [state])
+
+  if (state) return null
+
+  const busyId = error ? null : joiningTableId
+
+  const chooseTable = (table: TableStatus) => {
     startAmbient()
-    join(name.trim(), room.trim() || 'tavern')
+    join(table.id)
   }
 
   return (
     <div className="lobby">
-      <form className="lobby-card parchment" onSubmit={submit}>
-        <h1>🎲 酒馆骰子</h1>
-        <p className="subtitle">Farkle · 中世纪骰子对局</p>
-        <label>
-          你的名字
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="例如：亨利"
-            maxLength={16}
-          />
-        </label>
-        <label>
-          房间号（相同房间号的朋友会进入同一牌桌）
-          <input value={room} onChange={(e) => setRoom(e.target.value)} maxLength={24} />
-        </label>
-        <button className="btn primary big" type="submit" disabled={connected}>
-          {connected ? '连接中…' : '进入酒馆'}
-        </button>
-        <p className="hint">目标：率先攒满 10,000 分 · 首次入库至少 300 分</p>
-      </form>
+      <section className="lobby-card parchment">
+        <header className="lobby-header">
+          <h1>Farkle</h1>
+          <div className="guest-badge">
+            <span>游客</span>
+            <strong>{myName}</strong>
+          </div>
+        </header>
+
+        <div className="lobby-heading">
+          <h2>选择牌桌</h2>
+          <span>{loading ? '加载中…' : `${tables.length} 张牌桌`}</span>
+        </div>
+
+        <div className="table-grid">
+          {tables.map((table) => {
+            const full = table.players >= table.maxPlayers
+            const disabled = table.inGame || full || busyId !== null
+            const status = table.inGame ? '对局中' : full ? '已满' : '等待中'
+            return (
+              <button
+                key={table.id}
+                type="button"
+                className={`table-card ${busyId === table.id ? 'active' : ''}`}
+                disabled={disabled}
+                onClick={() => chooseTable(table)}
+              >
+                <span className="table-name">{table.name}</span>
+                <span className="table-status">
+                  {table.players}/{table.maxPlayers} · {status}
+                </span>
+                <span className="table-action">
+                  {busyId === table.id ? '连接中…' : '入座'}
+                </span>
+              </button>
+            )
+          })}
+        </div>
+
+        <p className="hint">目标：率先攒满 3,000 分 · 首次入库至少 300 分</p>
+      </section>
+
+      {error && (
+        <div
+          className="toast error"
+          onClick={() => {
+            dismissError()
+          }}
+        >
+          {error}
+        </div>
+      )}
     </div>
   )
 }

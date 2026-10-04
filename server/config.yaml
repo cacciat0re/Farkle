@@ -1,0 +1,28 @@
+# Farkle 服务端配置
+# 桌子列表：新增/修改/删除桌子只需改这里，无需动代码
+database:
+  dsn: "host=localhost user=postgres password=20230612 dbname=farkle port=5432 sslmode=disable"
+
+server:
+  addr: ":8080"
+
+# 大厅开放的桌子（id 用于路由，name 为展示名，max_players 每桌上限）
+tables:
+  - id: apple
+    name: Apple
+    max_players: 2
+  - id: butter
+    name: Butter
+    max_players: 2
+  - id: charlie
+    name: Charlie
+    max_players: 2
+  - id: delta
+    name: Delta
+    max_players: 2
+  - id: echo
+    name: Echo
+    max_players: 2
+  - id: foxtrot
+    name: Foxtrot
+    max_players: 2

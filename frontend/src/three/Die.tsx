@@ -140,13 +140,13 @@ export function Die({ index, seed, rollSeq, selectable, highlighted, trayBounds,
     if (!api) return
 
     if (phase.current === 'rolling') {
-      // 兜底：意外穿模坠落时拉回托盘上方
+      // 兜底：意外穿模坠落时拉回托盘上方（非确定性场景，直接用 Math.random）
       if (api.translation().y < -1) {
         api.setTranslation(
           {
-            x: rnd(-trayBounds.x * 0.6, trayBounds.x * 0.6),
+            x: (Math.random() * 2 - 1) * trayBounds.x * 0.6,
             y: 3,
-            z: rnd(-trayBounds.z * 0.6, trayBounds.z * 0.6),
+            z: (Math.random() * 2 - 1) * trayBounds.z * 0.6,
           },
           true,
         )
@@ -194,6 +194,7 @@ export function Die({ index, seed, rollSeq, selectable, highlighted, trayBounds,
       if (t >= 1) {
         phase.current = 'settled'
         settledValue.current = correctTo ?? settledValue.current
+        if (settledValue.current != null) onSettled?.(index, settledValue.current)
         api.sleep()
       }
     }

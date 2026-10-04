@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"math/big"
+	"sync/atomic"
 	"time"
 )
 
@@ -15,42 +16,45 @@ const (
 	StateTurnEnd  = "turnEnd"
 	StateGameOver = "gameOver"
 
-	TargetScore       = 10000
+	TargetScore       = 3000
 	MinBankScore      = 300 // 首次入库最低分（经典规则）
-	MaxPlayers        = 4
-	RollTimeoutMillis = 12000 // 等待客户端上报投掷结果的超时时间
+	MinPlayersToStart = 2   // 单人不许开局
+	RollTimeoutMillis = 12000
 )
 
 type Player struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Score   int    `json:"score"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Score     int    `json:"score"`
 	HasBanked bool   `json:"hasBanked"` // 本局是否已首次入库
+	JoinedAt  int64  `json:"-"`
 }
 
 type GameState struct {
-	RoomID        string              `json:"roomId"`
-	Phase         string              `json:"phase"`
-	Players       []*Player           `json:"players"`
-	CurrentTurn   int                 `json:"currentTurn"`   // 玩家索引
-	DiceValues    []int               `json:"diceValues"`    // 当前散骰
-	LockedDice    []int               `json:"lockedDice"`    // 已锁定骰子（值）
-	TurnScore     int                 `json:"turnScore"`     // 本回合已累积（未入库）
-	RollCount     int                 `json:"rollCount"`
-	Winner        string              `json:"winner,omitempty"`
-	Farkled       bool                `json:"farkled"`       // 本回合是否爆牌
-	LastBanked    int                 `json:"lastBanked"`    // 上一次入库得分
-	RollID        int                 `json:"rollId"`        // 每次投掷递增
-	AnimatingTill int64               `json:"animatingTill"` // 投掷超时兜底截止 unix ms
+	RoomID        string    `json:"roomId"`
+	Phase         string    `json:"phase"`
+	Players       []*Player `json:"players"`
+	CurrentTurn   int       `json:"currentTurn"` // 玩家索引
+	DiceValues    []int     `json:"diceValues"`  // 当前散骰
+	LockedDice    []int     `json:"lockedDice"`  // 已锁定骰子（值）
+	TurnScore     int       `json:"turnScore"`   // 本回合已累积（未入库）
+	RollCount     int       `json:"rollCount"`
+	Winner        string    `json:"winner,omitempty"`
+	Farkled       bool      `json:"farkled"`       // 本回合是否爆牌
+	LastBanked    int       `json:"lastBanked"`    // 上一次入库得分
+	RollID        int       `json:"rollId"`        // 每次投掷递增
+	AnimatingTill int64     `json:"animatingTill"` // 投掷超时兜底截止 unix ms
+	RematchReady  []string  `json:"rematchReady"`  // 已选择继续游戏的玩家
+	ReadyPlayers  []string  `json:"readyPlayers"`  // 已点击准备的玩家
 }
 
 type ClientMessage struct {
-	Type     string   `json:"type"`
-	PlayerID string   `json:"playerId"`
-	Name     string   `json:"name,omitempty"`
-	RoomID   string   `json:"roomId"`
-	Keep     []int    `json:"keep,omitempty"` // 要锁定的骰子值
-	Roll     []int    `json:"roll,omitempty"` // 客户端物理动画的最终点数
+	Type     string `json:"type"`
+	PlayerID string `json:"playerId"`
+	Name     string `json:"name,omitempty"`
+	RoomID   string `json:"roomId"`
+	Keep     []int  `json:"keep,omitempty"` // 要锁定的骰子值
+	Roll     []int  `json:"roll,omitempty"` // 客户端物理动画的最终点数
 }
 
 type ServerMessage struct {
@@ -64,22 +68,29 @@ type ServerMessage struct {
 }
 
 type Room struct {
-	ID         string
-	Clients    map[*Client]bool
-	Players    map[string]*Player // playerID -> player
-	Order      []string           // 稳定的玩家顺序（加入先后），currentTurn 按下标引用
-	State      GameState
-	Register   chan *Client
-	Unregister chan *Client
-	Broadcast  chan []byte
-	Actions    chan func() // 所有游戏逻辑串行化到此执行，避免竞态
-	done       chan struct{}
-	gen        int // 每次投掷递增，用于作废过期的定时事件
+	ID          string
+	Name        string
+	MaxPlayers  int
+	Clients     map[*Client]bool
+	Players     map[string]*Player // playerID -> player
+	Order       []string           // 稳定的玩家顺序（加入先后），currentTurn 按下标引用
+	State       GameState
+	Register    chan *Client
+	Unregister  chan *Client
+	Broadcast   chan []byte
+	Actions     chan func() // 所有游戏逻辑串行化到此执行，避免竞态
+	done        chan struct{}
+	gen         int // 每次投掷递增，用于作废过期的定时事件
+	playerCount atomic.Int32
+	inGame      atomic.Bool
+	onStatus    func()
 }
 
-func NewRoom(id string) *Room {
+func NewRoom(t TableConfig, onStatus func()) *Room {
 	return &Room{
-		ID:         id,
+		ID:         t.ID,
+		Name:       t.Name,
+		MaxPlayers: t.MaxPlayers,
 		Clients:    make(map[*Client]bool),
 		Players:    make(map[string]*Player),
 		Order:      []string{},
@@ -88,17 +99,36 @@ func NewRoom(id string) *Room {
 		Broadcast:  make(chan []byte, 64),
 		Actions:    make(chan func(), 256),
 		done:       make(chan struct{}),
+		onStatus:   onStatus,
 		State: GameState{
-			RoomID:     id,
-			Phase:      StateWaiting,
-			DiceValues: []int{},
-			LockedDice: []int{},
-			Players:    []*Player{},
+			RoomID:       t.ID,
+			Phase:        StateWaiting,
+			DiceValues:   []int{},
+			LockedDice:   []int{},
+			RematchReady: []string{},
+			ReadyPlayers: []string{},
+			Players:      []*Player{},
 		},
 	}
 }
 
 func (r *Room) IsEmpty() bool { return len(r.Clients) == 0 }
+
+// Status 返回可供大厅 API 安全读取的桌子状态
+func (r *Room) Status() (int, bool) {
+	return int(r.playerCount.Load()), r.inGame.Load()
+}
+
+func (r *Room) updateStatus() {
+	playerCount := int32(len(r.Players))
+	phase := r.State.Phase
+	inGame := phase != "" && phase != StateWaiting && phase != StateGameOver
+	countChanged := r.playerCount.Swap(playerCount) != playerCount
+	gameChanged := r.inGame.Swap(inGame) != inGame
+	if (countChanged || gameChanged) && r.onStatus != nil {
+		r.onStatus()
+	}
+}
 
 // After 在 d 毫秒后将 f 排入串行事件队列；房间关闭时丢弃
 func (r *Room) After(d time.Duration, f func()) {
@@ -118,26 +148,15 @@ func (r *Room) Run() {
 		case c := <-r.Register:
 			r.Clients[c] = true
 		case c := <-r.Unregister:
-			delete(r.Clients, c)
-			if p, ok := r.Players[c.PlayerID]; ok {
-				delete(r.Players, c.PlayerID)
-				for i, id := range r.Order {
-					if id == c.PlayerID {
-						r.Order = append(r.Order[:i], r.Order[i+1:]...)
-						break
-					}
-				}
-				log.Printf("player %s left room %s", p.Name, r.ID)
-				r.rebuildPlayerList()
-				r.BroadcastState()
-			}
-			if len(r.Clients) == 0 {
-				return
-			}
+			r.removePlayer(c)
+			// 桌子由配置预热，空桌保留并等待下一位玩家，不能退出 Run 循环
 		case f := <-r.Actions:
 			f()
 		case msg := <-r.Broadcast:
 			for c := range r.Clients {
+				if c.PlayerID == "" {
+					continue
+				}
 				select {
 				case c.Send <- msg:
 				default:
@@ -171,8 +190,28 @@ func (r *Room) rebuildPlayerList() {
 
 func (r *Room) BroadcastState() {
 	r.rebuildPlayerList()
+	r.updateStatus()
 	payload, _ := json.Marshal(ServerMessage{Type: "GAME_STATE", State: &r.State, Timestamp: nowMs()})
 	r.Broadcast <- payload
+}
+
+func (r *Room) resetToWaiting() {
+	r.gen++
+	r.State.Phase = StateWaiting
+	r.State.CurrentTurn = 0
+	r.State.DiceValues = []int{}
+	r.State.LockedDice = []int{}
+	r.State.TurnScore = 0
+	r.State.RollCount = 0
+	r.State.Winner = ""
+	r.State.Farkled = false
+	r.State.LastBanked = 0
+	r.State.RematchReady = []string{}
+	r.State.ReadyPlayers = []string{}
+	for _, p := range r.Players {
+		p.Score = 0
+		p.HasBanked = false
+	}
 }
 
 func (r *Room) SendError(c *Client, err string) {
@@ -196,13 +235,29 @@ func rollDie() int {
 // ---- 游戏逻辑（服务端权威） ----
 
 func (r *Room) HandleJoin(c *Client, m ClientMessage) {
-	if len(r.Players) >= MaxPlayers && r.State.Phase != StateWaiting {
-		r.SendError(c, "房间已满")
+	for existing := range r.Clients {
+		if existing != c && existing.PlayerID == m.PlayerID {
+			r.SendError(c, "该玩家已在桌内")
+			return
+		}
+	}
+	// 已在桌内的同一玩家重连：不重复加入
+	if _, ok := r.Players[m.PlayerID]; ok {
+		c.PlayerID = m.PlayerID
+		r.BroadcastState()
 		return
 	}
-	player := &Player{ID: m.PlayerID, Name: m.Name, Score: 0}
+	if r.State.Phase != StateWaiting && r.State.Phase != StateGameOver {
+		r.SendError(c, "对局进行中，不能中途加入")
+		return
+	}
+	if len(r.Players) >= r.MaxPlayers {
+		r.SendError(c, "这张桌子已满")
+		return
+	}
+	player := &Player{ID: m.PlayerID, Name: m.Name, Score: 0, JoinedAt: nowMs()}
 	if player.Name == "" {
-		player.Name = "无名氏"
+		player.Name = "traveler"
 	}
 	r.Players[m.PlayerID] = player
 	r.Order = append(r.Order, m.PlayerID)
@@ -214,15 +269,61 @@ func (r *Room) HandleJoin(c *Client, m ClientMessage) {
 	r.BroadcastState()
 }
 
-func (r *Room) HandleStart(c *Client, m ClientMessage) {
-	if len(r.Players) < 1 {
-		r.SendError(c, "至少需要 1 名玩家")
+func (r *Room) removePlayer(c *Client) {
+	if _, exists := r.Clients[c]; !exists {
 		return
 	}
-	if r.State.Phase != StateWaiting && r.State.Phase != StateGameOver {
-		r.SendError(c, "游戏已在进行中")
+	delete(r.Clients, c)
+	p, ok := r.Players[c.PlayerID]
+	if !ok {
 		return
 	}
+	delete(r.Players, c.PlayerID)
+	for i, id := range r.Order {
+		if id == c.PlayerID {
+			r.Order = append(r.Order[:i], r.Order[i+1:]...)
+			break
+		}
+	}
+	log.Printf("player %s left room %s", p.Name, r.ID)
+	r.State.ReadyPlayers = removePlayerID(r.State.ReadyPlayers, c.PlayerID)
+	if r.State.Phase != StateWaiting {
+		r.resetToWaiting()
+	}
+	r.rebuildPlayerList()
+	r.BroadcastState()
+}
+
+func (r *Room) HandleLeave(c *Client, m ClientMessage) {
+	if r.State.Phase != StateWaiting {
+		r.SendError(c, "对局期间不能退出房间")
+		return
+	}
+	p, ok := r.Players[c.PlayerID]
+	if !ok {
+		r.SendError(c, "你不在当前牌桌")
+		return
+	}
+	if nowMs()-p.JoinedAt < 10000 {
+		r.SendError(c, "进入房间 10 秒后才能退出")
+		return
+	}
+
+	r.removePlayer(c)
+	payload, _ := json.Marshal(ServerMessage{Type: "ROOM_LEFT", Timestamp: nowMs()})
+	select {
+	case c.Send <- payload:
+	default:
+	}
+	if c.Conn != nil {
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			c.Conn.Close()
+		}()
+	}
+}
+
+func (r *Room) startGame() {
 	for _, p := range r.Players {
 		p.Score = 0
 		p.HasBanked = false
@@ -233,7 +334,47 @@ func (r *Room) HandleStart(c *Client, m ClientMessage) {
 	r.State.LockedDice = []int{}
 	r.State.RollCount = 0
 	r.State.Winner = ""
+	r.State.RematchReady = []string{}
+	r.State.ReadyPlayers = []string{}
 	r.doRoll()
+}
+
+func (r *Room) HandleReady(c *Client, m ClientMessage) {
+	if r.State.Phase != StateWaiting {
+		r.SendError(c, "当前不能准备")
+		return
+	}
+	if _, ok := r.Players[m.PlayerID]; !ok {
+		r.SendError(c, "你不在当前牌桌")
+		return
+	}
+	if !containsPlayerID(r.State.ReadyPlayers, m.PlayerID) {
+		r.State.ReadyPlayers = append(r.State.ReadyPlayers, m.PlayerID)
+	}
+	if len(r.Players) >= MinPlayersToStart && len(r.State.ReadyPlayers) == len(r.Players) {
+		r.startGame()
+		return
+	}
+	r.BroadcastState()
+}
+
+func containsPlayerID(ids []string, id string) bool {
+	for _, existing := range ids {
+		if existing == id {
+			return true
+		}
+	}
+	return false
+}
+
+func removePlayerID(ids []string, id string) []string {
+	result := ids[:0]
+	for _, existing := range ids {
+		if existing != id {
+			result = append(result, existing)
+		}
+	}
+	return result
 }
 
 // beginRoll 广播"请投掷"（rollId + 骰子数），等待当前玩家客户端物理动画结束后
@@ -254,6 +395,7 @@ func (r *Room) doRoll() {
 	r.State.Phase = StateRolling
 	r.State.RollID = gen
 	r.State.AnimatingTill = nowMs() + RollTimeoutMillis
+	r.updateStatus()
 
 	// roll 字段携带 [骰子数量, 随机种子]；种子让全桌客户端跑出一致的物理结果
 	seed := int(rollDie()*1000000) + int(nowMs()%1000000)
@@ -281,10 +423,10 @@ func (r *Room) doRoll() {
 // applyRoll 结算一次投掷（来自客户端上报或服务端兜底）
 func (r *Room) applyRoll(dice []int) {
 	r.State.DiceValues = dice
-	res := scoreDice(dice)
+	isFarkle := bestScore(dice) == 0
 	gen := r.gen
 
-	if res.IsFarkle {
+	if isFarkle {
 		r.State.TurnScore = 0
 		r.State.Farkled = true
 		r.State.Phase = StateTurnEnd
@@ -303,12 +445,12 @@ func (r *Room) applyRoll(dice []int) {
 
 // HandleRollResult 接收投掷者客户端上报的物理动画结果
 func (r *Room) HandleRollResult(c *Client, m ClientMessage) {
-	if r.State.Phase != StateRolling {
-		r.SendError(c, "当前不在投掷阶段")
-		return
-	}
 	if !r.isCurrentPlayer(m.PlayerID) {
 		r.SendError(c, "还没轮到你")
+		return
+	}
+	if r.State.Phase != StateRolling {
+		r.SendError(c, "当前不在投掷阶段")
 		return
 	}
 	expected := 6 - len(r.State.LockedDice)
@@ -405,6 +547,7 @@ func (r *Room) HandleBank(c *Client, m ClientMessage) {
 	if p.Score >= TargetScore {
 		r.State.Phase = StateGameOver
 		r.State.Winner = p.Name
+		r.State.RematchReady = []string{}
 		r.BroadcastState()
 		return
 	}
@@ -416,6 +559,27 @@ func (r *Room) HandleBank(c *Client, m ClientMessage) {
 		}
 		r.nextTurn()
 	})
+}
+
+func (r *Room) HandleRematchReady(c *Client, m ClientMessage) {
+	if r.State.Phase != StateGameOver {
+		r.SendError(c, "对局尚未结束")
+		return
+	}
+	if _, ok := r.Players[m.PlayerID]; !ok {
+		r.SendError(c, "你不在当前牌桌")
+		return
+	}
+	for _, id := range r.State.RematchReady {
+		if id == m.PlayerID {
+			return
+		}
+	}
+	r.State.RematchReady = append(r.State.RematchReady, m.PlayerID)
+	if len(r.Players) >= MinPlayersToStart && len(r.State.RematchReady) == len(r.Players) {
+		r.resetToWaiting()
+	}
+	r.BroadcastState()
 }
 
 func (r *Room) nextTurn() {

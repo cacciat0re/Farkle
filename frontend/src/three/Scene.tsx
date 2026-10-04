@@ -4,7 +4,9 @@ import { Canvas, useFrame } from '@react-three/fiber'
 import { Physics, RigidBody, CuboidCollider } from '@react-three/rapier'
 import { Environment, ContactShadows } from '@react-three/drei'
 import { Die } from './Die'
-import { createWoodTexture, createLeatherTexture, createDiceFaceTexture } from './textures'
+import { createWoodTexture, createDiceFaceTexture, createFeltTexture } from './textures'
+import { selectableIndices } from '../game/scoring'
+import { hiddenIndices } from '../game/selection'
 import { useGameStore, useIsMyTurn } from '../store'
 
 const TRAY = { x: 4.2, z: 2.6 } // 托盘内沿半宽
@@ -37,30 +39,91 @@ function Table() {
           <meshStandardMaterial map={wood} roughness={0.72} metalness={0.05} />
         </mesh>
       </RigidBody>
-      {/* 隐形空气墙（只有物理碰撞体，不可见） */}
+      {/* 隐形空气墙：高 6 米，骰子绝无可能翻出盘子 */}
       <RigidBody type="fixed" colliders={false}>
-        <CuboidCollider args={[TRAY.x + 0.5, 1.2, 0.25]} position={[0, 1.2, -TRAY.z - 0.25]} />
-        <CuboidCollider args={[TRAY.x + 0.5, 1.2, 0.25]} position={[0, 1.2, TRAY.z + 0.25]} />
-        <CuboidCollider args={[0.25, 1.2, TRAY.z + 0.5]} position={[-TRAY.x - 0.25, 1.2, 0]} />
-        <CuboidCollider args={[0.25, 1.2, TRAY.z + 0.5]} position={[TRAY.x + 0.25, 1.2, 0]} />
+        <CuboidCollider args={[TRAY.x + 0.5, 3, 0.25]} position={[0, 3, -TRAY.z - 0.25]} />
+        <CuboidCollider args={[TRAY.x + 0.5, 3, 0.25]} position={[0, 3, TRAY.z + 0.25]} />
+        <CuboidCollider args={[0.25, 3, TRAY.z + 0.5]} position={[-TRAY.x - 0.25, 3, 0]} />
+        <CuboidCollider args={[0.25, 3, TRAY.z + 0.5]} position={[TRAY.x + 0.25, 3, 0]} />
       </RigidBody>
-      {/* 木盘底板（比空气墙略大，视觉上就是一块干净的盘子） */}
+      {/* 绿毡骰盘（与木桌明显区分） */}
       <RigidBody type="fixed" colliders="cuboid">
         <mesh receiveShadow position={[0, -0.05, 0]}>
           <boxGeometry args={[TRAY.x * 2 + 1.6, 0.1, TRAY.z * 2 + 1.6]} />
-          <meshStandardMaterial map={wood} roughness={0.6} metalness={0.03} />
+          <meshStandardMaterial map={createFeltTexture()} roughness={0.95} metalness={0} />
         </mesh>
       </RigidBody>
     </group>
   )
 }
 
+function TableCandle({ position }: { position: [number, number, number] }) {
+  return (
+    <group position={position}>
+      <mesh castShadow receiveShadow position={[0, 0.018, 0]}>
+        <cylinderGeometry args={[0.36, 0.38, 0.036, 24]} />
+        <meshStandardMaterial color="#6a4427" roughness={0.92} />
+      </mesh>
+      <mesh castShadow position={[0, 0.28, 0]}>
+        <cylinderGeometry args={[0.14, 0.17, 0.48, 16]} />
+        <meshStandardMaterial color="#d8c8a2" roughness={0.82} />
+      </mesh>
+      <mesh position={[0, 0.61, 0]}>
+        <coneGeometry args={[0.065, 0.18, 12]} />
+        <meshBasicMaterial color="#ffbd57" />
+      </mesh>
+    </group>
+  )
+}
+
+function Mug({ position }: { position: [number, number, number] }) {
+  return (
+    <group position={position}>
+      {/* 外壁 */}
+      <mesh castShadow position={[0, 0.32, 0]}>
+        <cylinderGeometry args={[0.32, 0.28, 0.64, 24, 1, true]} />
+        <meshStandardMaterial color="#a8763e" metalness={0.08} roughness={0.62} side={THREE.FrontSide} />
+      </mesh>
+      {/* 内壁：BackSide 形成掏空后的杯腔 */}
+      <mesh position={[0, 0.335, 0]}>
+        <cylinderGeometry args={[0.275, 0.24, 0.6, 24, 1, true]} />
+        <meshStandardMaterial color="#5c351c" roughness={0.78} side={THREE.BackSide} />
+      </mesh>
+      {/* 杯底 */}
+      <mesh castShadow position={[0, 0.035, 0]}>
+        <cylinderGeometry args={[0.29, 0.285, 0.07, 24]} />
+        <meshStandardMaterial color="#a8763e" metalness={0.08} roughness={0.62} />
+      </mesh>
+      {/* 杯口 */}
+      <mesh position={[0, 0.64, 0]} rotation={[Math.PI / 2, 0, 0]}>
+        <torusGeometry args={[0.295, 0.026, 10, 28]} />
+        <meshStandardMaterial color="#b88449" metalness={0.08} roughness={0.56} />
+      </mesh>
+      <mesh castShadow position={[0.34, 0.34, 0]}>
+        <torusGeometry args={[0.18, 0.055, 10, 24]} />
+        <meshStandardMaterial color="#a8763e" metalness={0.08} roughness={0.62} />
+      </mesh>
+    </group>
+  )
+}
+
+function TableDecor() {
+  return (
+    <group>
+      <TableCandle position={[-8, 0, -4]} />
+      <Mug position={[-7, 0, -3.2]} />
+    </group>
+  )
+}
+
 /** 已锁定的骰子：静态陈列在托盘旁 */
-function LockedDie({ value, index }: { value: number; index: number }) {
+function LockedDie({ value, index, opposite }: { value: number; index: number; opposite: boolean }) {
   const tex = useMemo(() => createDiceFaceTexture(value), [value])
   const x = -TRAY.x + 0.7 + index * 0.75
+  const z = opposite ? -TRAY.z - 1.4 : TRAY.z + 1.4
+  const tilt = opposite ? Math.PI / 2.4 : -Math.PI / 2.4
   return (
-    <mesh castShadow position={[x, 0.28, TRAY.z + 1.4]} rotation={[-Math.PI / 2.4, 0, 0.15 * index]}>
+    <mesh castShadow position={[x, 0.28, z]} rotation={[tilt, 0, 0.15 * index]}>
       <boxGeometry args={[0.5, 0.5, 0.5]} />
       <meshStandardMaterial map={tex} roughness={0.32} />
     </mesh>
@@ -77,32 +140,32 @@ function DiceRig() {
   const selected = useGameStore((s) => s.selected)
   const isMyTurn = useIsMyTurn()
 
-  const lockedDice = state?.lockedDice ?? []
+  const lockedDice = state?.lockedDice
+  const remainingDice = state?.diceValues
   const phase = state?.phase
   const scoring = phase === 'scoring' && isMyTurn
+  const authoritativeValues =
+    !isMyTurn && phase === 'scoring' && remainingDice?.length === rollingCount
+      ? remainingDice
+      : null
 
   // 始终渲染本次投掷的全部骰子（锁定只是隐藏，不卸载，保留物理状态与索引稳定）
   const count = rollingCount
 
-  // 已锁定的骰子从托盘隐藏：所有客户端种子一致，settledValues 即每颗骰子的值，
-  // 按值匹配 lockedDice 多重集（取先出现的）得出要隐藏的索引——投掷者和观战者都适用
+  // 已锁定的骰子从托盘隐藏：state.diceValues 是锁定后的剩余骰池，
+  // 当前物理数组中未出现在该池里的骰子就是本轮刚锁定的骰子。
   const hiddenSet = useMemo(() => {
     if (phase !== 'scoring' && phase !== 'turnEnd') return new Set<number>()
-    const remaining = new Map<number, number>()
-    for (const v of lockedDice) remaining.set(v, (remaining.get(v) ?? 0) + 1)
-    const hidden = new Set<number>()
-    settledValues.forEach((v, i) => {
-      const c = remaining.get(v ?? -1) ?? 0
-      if (c > 0) {
-        hidden.add(i)
-        remaining.set(v!, c - 1)
-      }
-    })
-    return hidden
-  }, [phase, lockedDice, settledValues])
+    return hiddenIndices(settledValues, remainingDice ?? [])
+  }, [phase, remainingDice, settledValues])
 
   // selected 是骰子索引集合
   const selectedSet = useMemo(() => new Set(selected), [selected])
+  const selectableSet = useMemo(() => {
+    if (!scoring || settledValues.some((v) => v == null)) return new Set<number>()
+    const pool = settledValues.map((v, i) => (hiddenSet.has(i) ? null : v))
+    return selectableIndices(pool, selected)
+  }, [scoring, settledValues, hiddenSet, selected])
 
   const handleSettled = useCallback(
     (index: number, value: number) => reportDieSettled(index, value),
@@ -117,35 +180,25 @@ function DiceRig() {
           index={i}
           seed={rollSeed}
           rollSeq={rollSeq}
-          selectable={scoring && !hiddenSet.has(i)}
+          selectable={scoring && !hiddenSet.has(i) && (selectedSet.has(i) || selectableSet.has(i))}
           highlighted={selectedSet.has(i)}
           trayBounds={TRAY}
           hidden={hiddenSet.has(i)}
+          correctTo={authoritativeValues?.[i] ?? null}
           onSettled={handleSettled}
         />
       ))}
-      {lockedDice.map((v, i) => (
-        <LockedDie key={`L${i}`} value={v} index={i} />
+      {lockedDice?.map((v, i) => (
+        <LockedDie key={`L${i}`} value={v} index={i} opposite={!isMyTurn} />
       ))}
     </group>
-  )
-}
-
-/** 骰盅装饰 */
-function DiceCup() {
-  const leather = useMemo(() => createLeatherTexture(), [])
-  return (
-    <mesh castShadow position={[TRAY.x + 2.2, 0.9, -1.8]} rotation={[0.25, 0, -0.9]}>
-      <cylinderGeometry args={[0.85, 0.65, 1.8, 32, 1, true]} />
-      <meshStandardMaterial map={leather} roughness={0.9} side={THREE.DoubleSide} />
-    </mesh>
   )
 }
 
 function CameraRig() {
   useFrame(({ camera, pointer }) => {
     // 轻微视差
-    camera.position.x += (pointer.x * 1.2 - camera.position.x + 0) * 0.03
+    camera.position.x += (pointer.x * 0.5 - camera.position.x) * 0.03
     camera.lookAt(0, 0, 0)
   })
   return null
@@ -193,15 +246,13 @@ export function Scene() {
       />
       <ambientLight intensity={0.12} color="#4a3a55" />
       <Candle position={[-8, 1.6, -4]} />
-      <Candle position={[8, 1.4, 3]} color="#ff8438" intensity={4} />
-      <Candle position={[-6, 1.2, 5]} color="#ffb050" intensity={3} />
 
       <Physics gravity={[0, -9.81, 0]} timeStep={1 / 60}>
         <Table />
         <DiceRig />
       </Physics>
 
-      <DiceCup />
+      <TableDecor />
       <ContactShadows position={[0, -0.04, 0]} opacity={0.55} scale={22} blur={2.2} far={4} />
     </Canvas>
   )

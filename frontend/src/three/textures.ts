@@ -113,6 +113,27 @@ export function createDiceFaceTexture(value: number, size = 256): THREE.CanvasTe
   return tex
 }
 
+/** 绿毡（骰盘台面）贴图——与木桌明显区分 */
+export function createFeltTexture(size = 512): THREE.CanvasTexture {
+  const c = document.createElement('canvas')
+  c.width = c.height = size
+  const ctx = c.getContext('2d')!
+  ctx.fillStyle = '#2e5d3a'
+  ctx.fillRect(0, 0, size, size)
+  const img = ctx.getImageData(0, 0, size, size)
+  for (let i = 0; i < img.data.length; i += 4) {
+    const n = (Math.random() - 0.5) * 18
+    img.data[i] += n * 0.6
+    img.data[i + 1] += n
+    img.data[i + 2] += n * 0.6
+  }
+  ctx.putImageData(img, 0, 0)
+  const tex = new THREE.CanvasTexture(c)
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping
+  tex.colorSpace = THREE.SRGBColorSpace
+  return tex
+}
+
 /** 皮革（骰盅/托盘边框）贴图 */
 export function createLeatherTexture(size = 512): THREE.CanvasTexture {
   const c = document.createElement('canvas')
