@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import { Canvas, useFrame } from '@react-three/fiber'
 import { Physics, RigidBody, CuboidCollider } from '@react-three/rapier'
@@ -8,13 +8,17 @@ import { createWoodTexture, createDiceFaceTexture, createFeltTexture } from './t
 import { selectableIndices } from '../game/scoring'
 import { hiddenIndices } from '../game/selection'
 import { useGameStore, useIsMyTurn } from '../store'
+import { PHYSICS_STEP } from './physics'
+import { NUMBERS_PER_DIE, setRapierModule } from './trajectory'
+import { useRapier } from '@react-three/rapier'
 
 const TRAY = { x: 4.2, z: 2.6 } // 托盘内沿半宽
 
 /** 火焰摇曳的点光源 */
 function Candle({ position, color = '#ff9c3f', intensity = 6 }: { position: [number, number, number]; color?: string; intensity?: number }) {
   const ref = useRef<THREE.PointLight>(null)
-  const seed = useMemo(() => Math.random() * 100, [])
+  // 固定相位：不用 Math.random，保证两端看到同一套烛光闪烁
+  const seed = 17.3
   useFrame(({ clock }) => {
     const t = clock.elapsedTime
     if (ref.current) {
@@ -76,42 +80,11 @@ function TableCandle({ position }: { position: [number, number, number] }) {
   )
 }
 
-function Mug({ position }: { position: [number, number, number] }) {
-  return (
-    <group position={position}>
-      {/* 外壁 */}
-      <mesh castShadow position={[0, 0.32, 0]}>
-        <cylinderGeometry args={[0.32, 0.28, 0.64, 24, 1, true]} />
-        <meshStandardMaterial color="#a8763e" metalness={0.08} roughness={0.62} side={THREE.FrontSide} />
-      </mesh>
-      {/* 内壁：BackSide 形成掏空后的杯腔 */}
-      <mesh position={[0, 0.335, 0]}>
-        <cylinderGeometry args={[0.275, 0.24, 0.6, 24, 1, true]} />
-        <meshStandardMaterial color="#5c351c" roughness={0.78} side={THREE.BackSide} />
-      </mesh>
-      {/* 杯底 */}
-      <mesh castShadow position={[0, 0.035, 0]}>
-        <cylinderGeometry args={[0.29, 0.285, 0.07, 24]} />
-        <meshStandardMaterial color="#a8763e" metalness={0.08} roughness={0.62} />
-      </mesh>
-      {/* 杯口 */}
-      <mesh position={[0, 0.64, 0]} rotation={[Math.PI / 2, 0, 0]}>
-        <torusGeometry args={[0.295, 0.026, 10, 28]} />
-        <meshStandardMaterial color="#b88449" metalness={0.08} roughness={0.56} />
-      </mesh>
-      <mesh castShadow position={[0.34, 0.34, 0]}>
-        <torusGeometry args={[0.18, 0.055, 10, 24]} />
-        <meshStandardMaterial color="#a8763e" metalness={0.08} roughness={0.62} />
-      </mesh>
-    </group>
-  )
-}
-
 function TableDecor() {
   return (
     <group>
-      <TableCandle position={[-8, 0, -4]} />
-      <Mug position={[-7, 0, -3.2]} />
+      {/* 放在桌面右上角，避开左上角的聊天框 */}
+      <TableCandle position={[6.6, 0, -4]} />
     </group>
   )
 }
@@ -119,24 +92,31 @@ function TableDecor() {
 /** 已锁定的骰子：静态陈列在托盘旁 */
 function LockedDie({ value, index, opposite }: { value: number; index: number; opposite: boolean }) {
   const tex = useMemo(() => createDiceFaceTexture(value), [value])
-  const x = -TRAY.x + 0.7 + index * 0.75
+  const x = -TRAY.x + 0.7 + index * 0.68
   const z = opposite ? -TRAY.z - 1.4 : TRAY.z + 1.4
   const tilt = opposite ? Math.PI / 2.4 : -Math.PI / 2.4
   return (
-    <mesh castShadow position={[x, 0.28, z]} rotation={[tilt, 0, 0.15 * index]}>
-      <boxGeometry args={[0.5, 0.5, 0.5]} />
+    <mesh castShadow position={[x, 0.23, z]} rotation={[tilt, 0, 0.15 * index]}>
+      <boxGeometry args={[0.44, 0.44, 0.44]} />
       <meshStandardMaterial map={tex} roughness={0.32} />
     </mesh>
   )
 }
 
 function DiceRig() {
+  // @react-three/rapier 已完成 wasm 初始化，把它交给离线预演复用，避免二次 init 卡住
+  const { rapier } = useRapier()
+  useEffect(() => {
+    setRapierModule(rapier)
+  }, [rapier])
+
   const state = useGameStore((s) => s.state)
-  const rollSeq = useGameStore((s) => s.rollSeq)
-  const rollSeed = useGameStore((s) => s.rollSeed)
   const rollingCount = useGameStore((s) => s.rollingCount)
+  const trajectory = useGameStore((s) => s.trajectory)
+  const trajectoryDice = useGameStore((s) => s.trajectoryDice)
+  const trajectoryLive = useGameStore((s) => s.trajectoryLive)
+  const stepsPerFrame = useGameStore((s) => s.stepsPerFrame)
   const settledValues = useGameStore((s) => s.settledValues)
-  const reportDieSettled = useGameStore((s) => s.reportDieSettled)
   const selected = useGameStore((s) => s.selected)
   const isMyTurn = useIsMyTurn()
 
@@ -144,13 +124,14 @@ function DiceRig() {
   const remainingDice = state?.diceValues
   const phase = state?.phase
   const scoring = phase === 'scoring' && isMyTurn
-  const authoritativeValues =
-    !isMyTurn && phase === 'scoring' && remainingDice?.length === rollingCount
-      ? remainingDice
-      : null
+  // 本轮关键帧轨迹：投掷者离线预演后广播，所有人（含投掷者）回放同一份
+  const playing =
+    !!trajectory && trajectoryLive && (phase === 'rolling' || phase === 'scoring' || phase === 'turnEnd')
+  // 一帧的步长按本次投掷的骰子数算（锁骰后只剩 N 颗，不是固定 42）
+  const stride = Math.max(1, trajectoryDice || rollingCount || 6) * NUMBERS_PER_DIE
 
   // 始终渲染本次投掷的全部骰子（锁定只是隐藏，不卸载，保留物理状态与索引稳定）
-  const count = rollingCount
+  const count = rollingCount || 6
 
   // 已锁定的骰子从托盘隐藏：state.diceValues 是锁定后的剩余骰池，
   // 当前物理数组中未出现在该池里的骰子就是本轮刚锁定的骰子。
@@ -167,25 +148,19 @@ function DiceRig() {
     return selectableIndices(pool, selected)
   }, [scoring, settledValues, hiddenSet, selected])
 
-  const handleSettled = useCallback(
-    (index: number, value: number) => reportDieSettled(index, value),
-    [reportDieSettled],
-  )
-
   return (
     <group>
       {Array.from({ length: count }, (_, i) => (
         <Die
           key={i}
           index={i}
-          seed={rollSeed}
-          rollSeq={rollSeq}
+          frames={trajectory}
+          stride={stride}
+          stepsPerFrame={stepsPerFrame}
+          playing={playing}
           selectable={scoring && !hiddenSet.has(i) && (selectedSet.has(i) || selectableSet.has(i))}
           highlighted={selectedSet.has(i)}
-          trayBounds={TRAY}
           hidden={hiddenSet.has(i)}
-          correctTo={authoritativeValues?.[i] ?? null}
-          onSettled={handleSettled}
         />
       ))}
       {lockedDice?.map((v, i) => (
@@ -238,16 +213,17 @@ export function Scene() {
         position={[0, 10, 2]}
         angle={0.65}
         penumbra={0.6}
-        intensity={140}
+        intensity={170}
         color="#ffc078"
         castShadow
         shadow-mapSize={[2048, 2048]}
         shadow-bias={-0.0004}
       />
       <ambientLight intensity={0.12} color="#4a3a55" />
-      <Candle position={[-8, 1.6, -4]} />
+      <Candle position={[6.6, 1.6, -4]} />
 
-      <Physics gravity={[0, -9.81, 0]} timeStep={1 / 60}>
+      {/* 固定步长 + 关闭插值：渲染状态直接来自模拟状态，两端画面一致 */}
+      <Physics gravity={[0, -9.81, 0]} timeStep={PHYSICS_STEP} interpolate={false}>
         <Table />
         <DiceRig />
       </Physics>

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"math/big"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -20,6 +21,11 @@ const (
 	MinBankScore      = 300 // 首次入库最低分（经典规则）
 	MinPlayersToStart = 2   // 单人不许开局
 	RollTimeoutMillis = 12000
+	MaxChatLength     = 200 // 单条聊天最大字符数
+
+	// 关键帧轨迹：每颗骰子每帧 7 个数（x,y,z,qx,qy,qz,qw）
+	TrajectoryNumbersPerDie = 7
+	MaxTrajectoryFrames     = 400 // 上限保护：400 帧 ≈ 20 秒，远大于正常投掷
 )
 
 type Player struct {
@@ -31,40 +37,65 @@ type Player struct {
 }
 
 type GameState struct {
-	RoomID        string    `json:"roomId"`
-	Phase         string    `json:"phase"`
-	Players       []*Player `json:"players"`
-	CurrentTurn   int       `json:"currentTurn"` // 玩家索引
-	DiceValues    []int     `json:"diceValues"`  // 当前散骰
-	LockedDice    []int     `json:"lockedDice"`  // 已锁定骰子（值）
-	TurnScore     int       `json:"turnScore"`   // 本回合已累积（未入库）
-	RollCount     int       `json:"rollCount"`
-	Winner        string    `json:"winner,omitempty"`
-	Farkled       bool      `json:"farkled"`       // 本回合是否爆牌
-	LastBanked    int       `json:"lastBanked"`    // 上一次入库得分
-	RollID        int       `json:"rollId"`        // 每次投掷递增
-	AnimatingTill int64     `json:"animatingTill"` // 投掷超时兜底截止 unix ms
-	RematchReady  []string  `json:"rematchReady"`  // 已选择继续游戏的玩家
-	ReadyPlayers  []string  `json:"readyPlayers"`  // 已点击准备的玩家
+	RoomID         string    `json:"roomId"`
+	Phase          string    `json:"phase"`
+	Players        []*Player `json:"players"`
+	CurrentTurn    int       `json:"currentTurn"` // 玩家索引
+	DiceValues     []int     `json:"diceValues"`  // 当前散骰
+	LockedDice     []int     `json:"lockedDice"`  // 已锁定骰子（值）
+	TurnScore      int       `json:"turnScore"`   // 本回合已累积（未入库）
+	RollCount      int       `json:"rollCount"`
+	Winner         string    `json:"winner,omitempty"`
+	Farkled        bool      `json:"farkled"`                  // 本回合是否爆牌
+	LastBanked     int       `json:"lastBanked"`               // 上一次入库得分
+	RollID         int       `json:"rollId"`                   // 每次投掷递增
+	AnimatingTill  int64     `json:"animatingTill"`            // 投掷超时兜底截止 unix ms
+	RematchReady   []string  `json:"rematchReady"`             // 已选择继续游戏的玩家
+	ReadyPlayers   []string  `json:"readyPlayers"`             // 已点击准备的玩家
+	KeptThisRoll   bool      `json:"keptThisRoll"`             // 本次投掷后是否已锁定至少一颗骰子
+	DicePoses      []DiePose `json:"dicePoses,omitempty"`      // 本轮权威姿态（投掷者上报，全桌对齐用）
+	Trajectory     []float64 `json:"trajectory,omitempty"`     // 本轮关键帧轨迹（扁平：每帧 N×7 个数）
+	TrajectoryDice int       `json:"trajectoryDice,omitempty"` // 轨迹里每帧包含的骰子数
+	StepsPerFrame  int       `json:"stepsPerFrame,omitempty"`  // 每个关键帧间隔的物理步数
+}
+
+// DiePose 一颗骰子停稳后的姿态（位置 + 四元数）
+type DiePose struct {
+	P [3]float64 `json:"p"`
+	Q [4]float64 `json:"q"`
 }
 
 type ClientMessage struct {
-	Type     string `json:"type"`
-	PlayerID string `json:"playerId"`
-	Name     string `json:"name,omitempty"`
-	RoomID   string `json:"roomId"`
-	Keep     []int  `json:"keep,omitempty"` // 要锁定的骰子值
-	Roll     []int  `json:"roll,omitempty"` // 客户端物理动画的最终点数
+	Type          string    `json:"type"`
+	PlayerID      string    `json:"playerId"`
+	Name          string    `json:"name,omitempty"`
+	RoomID        string    `json:"roomId"`
+	Keep          []int     `json:"keep,omitempty"`       // 要锁定的骰子值
+	Roll          []int     `json:"roll,omitempty"`       // 客户端物理动画的最终点数
+	Poses         []DiePose `json:"poses,omitempty"`      // 客户端物理动画的最终姿态
+	Trajectory    []float64 `json:"trajectory,omitempty"` // 预计算的关键帧轨迹
+	StepsPerFrame int       `json:"stepsPerFrame,omitempty"`
+	Text          string    `json:"text,omitempty"` // 聊天内容
+}
+
+// ChatMessage 一条桌内消息：玩家发言或系统事件（加入/离开）
+type ChatMessage struct {
+	Kind      string `json:"kind"` // "chat" 玩家发言 / "system" 系统事件
+	PlayerID  string `json:"playerId,omitempty"`
+	Name      string `json:"name,omitempty"`
+	Text      string `json:"text"`
+	Timestamp int64  `json:"timestamp"`
 }
 
 type ServerMessage struct {
-	Type      string     `json:"type"`
-	State     *GameState `json:"state,omitempty"`
-	Roll      []int      `json:"roll,omitempty"`
-	Error     string     `json:"error,omitempty"`
-	PlayerID  string     `json:"playerId,omitempty"`
-	RoomID    string     `json:"roomId,omitempty"`
-	Timestamp int64      `json:"timestamp"`
+	Type      string       `json:"type"`
+	State     *GameState   `json:"state,omitempty"`
+	Roll      []int        `json:"roll,omitempty"`
+	Chat      *ChatMessage `json:"chat,omitempty"`
+	Error     string       `json:"error,omitempty"`
+	PlayerID  string       `json:"playerId,omitempty"`
+	RoomID    string       `json:"roomId,omitempty"`
+	Timestamp int64        `json:"timestamp"`
 }
 
 type Room struct {
@@ -182,6 +213,7 @@ func (r *Room) rebuildPlayerList() {
 		r.State.DiceValues = []int{}
 		r.State.LockedDice = []int{}
 		r.State.TurnScore = 0
+		r.State.KeptThisRoll = false
 	}
 	if r.State.CurrentTurn >= len(players) {
 		r.State.CurrentTurn = 0
@@ -195,6 +227,22 @@ func (r *Room) BroadcastState() {
 	r.Broadcast <- payload
 }
 
+// broadcastChat 向桌内所有客户端推送一条聊天或系统事件；
+// 队列满时直接丢弃，绝不阻塞房间的事件循环。
+func (r *Room) broadcastChat(chat ChatMessage) {
+	if chat.Timestamp == 0 {
+		chat.Timestamp = nowMs()
+	}
+	payload, err := json.Marshal(ServerMessage{Type: "CHAT", Chat: &chat, Timestamp: nowMs()})
+	if err != nil {
+		return
+	}
+	select {
+	case r.Broadcast <- payload:
+	default:
+	}
+}
+
 func (r *Room) resetToWaiting() {
 	r.gen++
 	r.State.Phase = StateWaiting
@@ -206,6 +254,7 @@ func (r *Room) resetToWaiting() {
 	r.State.Winner = ""
 	r.State.Farkled = false
 	r.State.LastBanked = 0
+	r.State.KeptThisRoll = false
 	r.State.RematchReady = []string{}
 	r.State.ReadyPlayers = []string{}
 	for _, p := range r.Players {
@@ -267,12 +316,12 @@ func (r *Room) HandleJoin(c *Client, m ClientMessage) {
 		r.State.Phase = StateWaiting
 	}
 	r.BroadcastState()
+	r.broadcastChat(ChatMessage{Kind: "system", Text: player.Name + " 加入了牌桌"})
 }
 
 func (r *Room) removePlayer(c *Client) {
-	if _, exists := r.Clients[c]; !exists {
-		return
-	}
+	// 即使该 client 已经因发送队列溢出被移出 Clients，也必须按玩家 ID 清理，
+	// 否则会留下永远占座的“幽灵玩家”。
 	delete(r.Clients, c)
 	p, ok := r.Players[c.PlayerID]
 	if !ok {
@@ -292,6 +341,7 @@ func (r *Room) removePlayer(c *Client) {
 	}
 	r.rebuildPlayerList()
 	r.BroadcastState()
+	r.broadcastChat(ChatMessage{Kind: "system", Text: p.Name + " 离开了牌桌"})
 }
 
 func (r *Room) HandleLeave(c *Client, m ClientMessage) {
@@ -323,6 +373,29 @@ func (r *Room) HandleLeave(c *Client, m ClientMessage) {
 	}
 }
 
+// HandleChat 广播一条桌内聊天；聊天不限制对局阶段，等待和游戏中都能发言。
+func (r *Room) HandleChat(c *Client, m ClientMessage) {
+	// 以连接自身的身份发言，忽略客户端自报的 playerId，避免冒名顶替
+	player, ok := r.Players[c.PlayerID]
+	if !ok {
+		r.SendError(c, "你不在当前牌桌")
+		return
+	}
+	text := strings.TrimSpace(m.Text)
+	if text == "" {
+		return
+	}
+	if runes := []rune(text); len(runes) > MaxChatLength {
+		text = string(runes[:MaxChatLength])
+	}
+	r.broadcastChat(ChatMessage{
+		Kind:     "chat",
+		PlayerID: player.ID,
+		Name:     player.Name,
+		Text:     text,
+	})
+}
+
 func (r *Room) startGame() {
 	for _, p := range r.Players {
 		p.Score = 0
@@ -334,6 +407,7 @@ func (r *Room) startGame() {
 	r.State.LockedDice = []int{}
 	r.State.RollCount = 0
 	r.State.Winner = ""
+	r.State.KeptThisRoll = false
 	r.State.RematchReady = []string{}
 	r.State.ReadyPlayers = []string{}
 	r.doRoll()
@@ -389,9 +463,14 @@ func (r *Room) doRoll() {
 	gen := r.gen
 
 	r.State.DiceValues = []int{}
+	r.State.DicePoses = nil
+	r.State.Trajectory = nil
+	r.State.TrajectoryDice = 0
+	r.State.StepsPerFrame = 0
 	r.State.RollCount++
 	r.State.Farkled = false
 	r.State.LastBanked = 0
+	r.State.KeptThisRoll = false
 	r.State.Phase = StateRolling
 	r.State.RollID = gen
 	r.State.AnimatingTill = nowMs() + RollTimeoutMillis
@@ -468,6 +547,19 @@ func (r *Room) HandleRollResult(c *Client, m ClientMessage) {
 		}
 	}
 	r.gen++ // 作废兜底定时器
+	// 投掷者上报的最终姿态作为全桌权威姿态，观察者据此对齐画面
+	if len(m.Poses) == expected {
+		r.State.DicePoses = m.Poses
+	}
+	// 关键帧轨迹：结构校验通过才接受（每帧 = 本次投掷的骰子数 × 7 个数）。
+	// 注意步长必须按实际骰子数算：锁骰后只剩 N 颗，帧长度是 N×7 而不是固定的 42。
+	stride := expected * TrajectoryNumbersPerDie
+	if n := len(m.Trajectory); n > 0 && n%stride == 0 && n/stride <= MaxTrajectoryFrames &&
+		m.StepsPerFrame >= 1 && m.StepsPerFrame <= 60 {
+		r.State.Trajectory = m.Trajectory
+		r.State.TrajectoryDice = expected
+		r.State.StepsPerFrame = m.StepsPerFrame
+	}
 	r.applyRoll(m.Roll)
 }
 
@@ -509,6 +601,7 @@ func (r *Room) HandleKeep(c *Client, m ClientMessage) {
 	r.State.TurnScore += score
 	r.State.LockedDice = append(r.State.LockedDice, m.Keep...)
 	r.State.DiceValues = pool
+	r.State.KeptThisRoll = true
 	r.State.Phase = StateScoring
 	r.BroadcastState()
 }
@@ -522,6 +615,12 @@ func (r *Room) HandleRollAgain(c *Client, m ClientMessage) {
 		r.SendError(c, "还没轮到你")
 		return
 	}
+	// 必须先在本次投掷中锁定至少一颗得分骰，才能继续投掷；
+	// 否则玩家可以反复重掷直到掷出想要的点数。
+	if !r.State.KeptThisRoll {
+		r.SendError(c, "请先锁定至少一颗得分骰子，再继续投掷")
+		return
+	}
 	r.doRoll()
 }
 
@@ -532,6 +631,11 @@ func (r *Room) HandleBank(c *Client, m ClientMessage) {
 	}
 	if !r.isCurrentPlayer(m.PlayerID) {
 		r.SendError(c, "还没轮到你")
+		return
+	}
+	// 与继续投掷一致：每次投掷都必须先锁定得分骰，再决定继续或入库。
+	if !r.State.KeptThisRoll {
+		r.SendError(c, "请先锁定至少一颗得分骰子，再入库")
 		return
 	}
 	p := r.Players[m.PlayerID]

@@ -386,6 +386,155 @@ body,
   margin: 0;
 }
 
+/* ---------- 桌内聊天 ---------- */
+.chat-panel {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  width: 270px;
+  display: flex;
+  flex-direction: column;
+  max-height: 280px;
+  padding: 10px;
+  border-radius: 8px;
+  background: rgba(26, 15, 7, 0.72);
+  border: 1px solid rgba(201, 150, 46, 0.45);
+  z-index: 5;
+}
+
+.chat-list {
+  flex: 1;
+  min-height: 84px;
+  max-height: 200px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-right: 4px;
+  font-size: 13px;
+  line-height: 1.35;
+  color: #f0e2c4;
+  overscroll-behavior: contain;
+}
+
+.chat-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.chat-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.chat-list::-webkit-scrollbar-thumb {
+  background: rgba(201, 150, 46, 0.5);
+  border-radius: 3px;
+}
+
+.chat-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(201, 150, 46, 0.8);
+}
+
+.chat-list::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.chat-list::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* Firefox 不支持 webkit 伪元素，用标准属性保持同样观感（Chrome 下该块会被跳过） */
+@supports (-moz-appearance: none) {
+  .chat-list {
+    scrollbar-width: thin;
+    scrollbar-color: rgba(201, 150, 46, 0.55) transparent;
+  }
+}
+
+.chat-msg {
+  display: flex;
+  gap: 5px;
+  align-items: baseline;
+  word-break: break-word;
+}
+
+.chat-msg.system {
+  color: rgba(240, 226, 196, 0.55);
+  font-style: italic;
+}
+
+.chat-name {
+  flex: none;
+  font-weight: bold;
+  color: #e0b23e;
+}
+
+.chat-name::after {
+  content: ':';
+}
+
+.chat-text {
+  min-width: 0;
+  white-space: pre-wrap;
+}
+
+.chat-input {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.chat-input input {
+  flex: 1;
+  min-width: 0;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  border: 1px solid rgba(201, 150, 46, 0.4);
+  border-radius: 5px;
+  background: rgba(255, 245, 215, 0.1);
+  color: #f5e7c1;
+}
+
+.chat-input input::placeholder {
+  color: rgba(245, 231, 193, 0.4);
+}
+
+.chat-input input:focus {
+  outline: 1px solid var(--gold);
+  outline-offset: -1px;
+}
+
+.chat-send {
+  flex: none;
+  font-family: inherit;
+  font-size: 13px;
+  padding: 6px 10px;
+  border: none;
+  border-radius: 5px;
+  background: #c9962e;
+  color: #2c1e00;
+  cursor: pointer;
+}
+
+.chat-send:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+@media (max-width: 720px) {
+  .chat-panel {
+    top: 96px;
+    width: min(230px, 62vw);
+    max-height: 190px;
+  }
+
+  .chat-list {
+    max-height: 108px;
+  }
+}
+
 /* ---------- 错误提示 ---------- */
 .toast.error {
   position: absolute;
@@ -399,5 +548,19 @@ body,
   border: 1px solid #ff6b5e;
   cursor: pointer;
   font-size: 15px;
+  z-index: 20;
+}
+
+.toast.disconnected {
+  position: absolute;
+  top: 132px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(70, 45, 15, 0.94);
+  color: #ffe9c4;
+  padding: 8px 20px;
+  border-radius: 8px;
+  border: 1px solid #d8a251;
+  font-size: 14px;
   z-index: 20;
 }

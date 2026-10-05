@@ -4,7 +4,7 @@ database:
   dsn: "host=localhost user=postgres password=20230612 dbname=farkle port=5432 sslmode=disable"
 
 server:
-  addr: ":8080"
+  addr: ":8086"
 
 # 大厅开放的桌子（id 用于路由，name 为展示名，max_players 每桌上限）
 tables:

@@ -12,6 +12,8 @@ function autoRoll(c) {
     if (m.type === 'ROLL_REQUESTED' && c.state?.players[c.state.currentTurn]?.id === c.pid) {
       const count = m.roll[0]
       const values = Array.from({ length: count }, () => 1 + Math.floor(Math.random() * 6))
+      // 保证每次投掷至少有一颗 1 或 5，脚本才能先锁定再继续投掷/入库
+      values[0] = Math.random() < 0.5 ? 1 : 5
       setTimeout(() => send(c, { type: 'ROLL_RESULT', playerId: c.pid, roomId: room, roll: values }), 200)
     }
   })

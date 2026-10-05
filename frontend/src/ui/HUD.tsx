@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { useGameStore, useIsMyTurn } from '../store'
 import { scoreFull } from '../game/scoring'
+import { Chat } from './Chat'
 
 export function HUD() {
   const state = useGameStore((s) => s.state)
+  const connected = useGameStore((s) => s.connected)
   const selected = useGameStore((s) => s.selected)
   const error = useGameStore((s) => s.error)
   const isMyTurn = useIsMyTurn()
@@ -48,6 +50,8 @@ export function HUD() {
 
   return (
     <div className="hud">
+      <Chat />
+
       {/* 顶部：玩家计分板 */}
       <div className="scoreboard parchment">
         {state.players.map((p, i) => (
@@ -113,10 +117,15 @@ export function HUD() {
             >
               锁定所选{hasSelection && selectedIsValid ? `（+${selectedScore}）` : ''}
             </button>
-            <button className="btn" onClick={rollDice}>
+            {/* 必须先锁定本轮的得分骰；有未锁定的选择时也不允许直接重掷 */}
+            <button
+              className="btn"
+              disabled={!state.keptThisRoll || selected.length > 0}
+              onClick={rollDice}
+            >
               继续掷骰
             </button>
-            <button className="btn gold" onClick={bank}>
+            <button className="btn gold" disabled={!state.keptThisRoll} onClick={bank}>
               入库（{state.turnScore}）
             </button>
           </>
@@ -143,6 +152,9 @@ export function HUD() {
           {error}
         </div>
       )}
+
+      {/* 连接被意外断开时必须明说，否则玩家会一直卡在一个不会更新的旧状态里 */}
+      {state && !connected && <div className="toast disconnected">与牌桌的连接已断开</div>}
     </div>
   )
 }

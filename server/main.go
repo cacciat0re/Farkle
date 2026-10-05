@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
 func main() {
+	log.SetOutput(os.Stdout)
+
 	cfg, err := LoadConfig("config.yaml")
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)

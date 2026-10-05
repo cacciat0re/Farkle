@@ -1,7 +1,23 @@
 import * as THREE from 'three'
 
+/**
+ * 确定性 PRNG：贴图用固定种子生成，
+ * 保证两台客户端渲染出的木纹/骰面/毡面完全一致。
+ */
+function mulberry32(seed: number) {
+  let a = seed >>> 0
+  return () => {
+    a |= 0
+    a = (a + 0x6d2b79f5) | 0
+    let t = Math.imul(a ^ (a >>> 15), 1 | a)
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+  }
+}
+
 /** 用 Canvas 程序化生成木纹贴图（含法线感的明暗条纹） */
 export function createWoodTexture(size = 1024): THREE.CanvasTexture {
+  const rand = mulberry32(0x51ed2701)
   const c = document.createElement('canvas')
   c.width = c.height = size
   const ctx = c.getContext('2d')!
@@ -15,21 +31,21 @@ export function createWoodTexture(size = 1024): THREE.CanvasTexture {
   const plankH = size / planks
   for (let p = 0; p < planks; p++) {
     const y = p * plankH
-    const tone = 0.85 + Math.random() * 0.3
+    const tone = 0.85 + rand() * 0.3
     ctx.fillStyle = `rgb(${74 * tone | 0},${47 * tone | 0},${29 * tone | 0})`
     ctx.fillRect(0, y, size, plankH)
     // 木纹曲线
     for (let i = 0; i < 90; i++) {
-      const gy = y + Math.random() * plankH
-      const alpha = 0.04 + Math.random() * 0.10
-      ctx.strokeStyle = Math.random() > 0.5
+      const gy = y + rand() * plankH
+      const alpha = 0.04 + rand() * 0.10
+      ctx.strokeStyle = rand() > 0.5
         ? `rgba(30,16,8,${alpha})`
         : `rgba(140,95,55,${alpha})`
-      ctx.lineWidth = 0.6 + Math.random() * 2.2
+      ctx.lineWidth = 0.6 + rand() * 2.2
       ctx.beginPath()
       ctx.moveTo(0, gy)
       for (let x = 0; x <= size; x += 32) {
-        ctx.lineTo(x, gy + Math.sin(x * 0.01 + p * 3 + i) * 4 * Math.random())
+        ctx.lineTo(x, gy + Math.sin(x * 0.01 + p * 3 + i) * 4 * rand())
       }
       ctx.stroke()
     }
@@ -41,7 +57,7 @@ export function createWoodTexture(size = 1024): THREE.CanvasTexture {
   // 噪点
   const img = ctx.getImageData(0, 0, size, size)
   for (let i = 0; i < img.data.length; i += 4) {
-    const n = (Math.random() - 0.5) * 14
+    const n = (rand() - 0.5) * 14
     img.data[i] += n
     img.data[i + 1] += n
     img.data[i + 2] += n
@@ -57,6 +73,7 @@ export function createWoodTexture(size = 1024): THREE.CanvasTexture {
 
 /** 骰子面贴图：骨白底 + 深色凹陷点数 */
 export function createDiceFaceTexture(value: number, size = 256): THREE.CanvasTexture {
+  const rand = mulberry32(0x9e3779b9 + value * 2654435761)
   const c = document.createElement('canvas')
   c.width = c.height = size
   const ctx = c.getContext('2d')!
@@ -71,7 +88,7 @@ export function createDiceFaceTexture(value: number, size = 256): THREE.CanvasTe
   // 细微噪点（骨材颗粒感）
   const img = ctx.getImageData(0, 0, size, size)
   for (let i = 0; i < img.data.length; i += 4) {
-    const n = (Math.random() - 0.5) * 10
+    const n = (rand() - 0.5) * 10
     img.data[i] += n
     img.data[i + 1] += n
     img.data[i + 2] += n * 0.8
@@ -115,6 +132,7 @@ export function createDiceFaceTexture(value: number, size = 256): THREE.CanvasTe
 
 /** 绿毡（骰盘台面）贴图——与木桌明显区分 */
 export function createFeltTexture(size = 512): THREE.CanvasTexture {
+  const rand = mulberry32(0x2545f491)
   const c = document.createElement('canvas')
   c.width = c.height = size
   const ctx = c.getContext('2d')!
@@ -122,7 +140,7 @@ export function createFeltTexture(size = 512): THREE.CanvasTexture {
   ctx.fillRect(0, 0, size, size)
   const img = ctx.getImageData(0, 0, size, size)
   for (let i = 0; i < img.data.length; i += 4) {
-    const n = (Math.random() - 0.5) * 18
+    const n = (rand() - 0.5) * 18
     img.data[i] += n * 0.6
     img.data[i + 1] += n
     img.data[i + 2] += n * 0.6
@@ -136,6 +154,7 @@ export function createFeltTexture(size = 512): THREE.CanvasTexture {
 
 /** 皮革（骰盅/托盘边框）贴图 */
 export function createLeatherTexture(size = 512): THREE.CanvasTexture {
+  const rand = mulberry32(0x27d4eb2f)
   const c = document.createElement('canvas')
   c.width = c.height = size
   const ctx = c.getContext('2d')!
@@ -143,7 +162,7 @@ export function createLeatherTexture(size = 512): THREE.CanvasTexture {
   ctx.fillRect(0, 0, size, size)
   const img = ctx.getImageData(0, 0, size, size)
   for (let i = 0; i < img.data.length; i += 4) {
-    const n = (Math.random() - 0.5) * 26
+    const n = (rand() - 0.5) * 26
     img.data[i] += n
     img.data[i + 1] += n * 0.7
     img.data[i + 2] += n * 0.5
