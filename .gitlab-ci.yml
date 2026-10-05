@@ -1,0 +1,32 @@
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+
+cache:
+  key:
+    files: [frontend/pnpm-lock.yaml]
+  paths: [.pnpm-store, .gradle]
+  policy: pull-push
+
+build-deploy:
+  stage: deploy
+  tags: [deploy]
+  script:
+    # Compile
+    - cd server && go build
+    - sudo cp farkle-server /opt/arorms/farkle/
+    - cd ..
+
+    - cd frontend && pnpm install && pnpm build
+    - sudo rsync -az --delete dist/ /var/www/arorms/farkle/
+    - cd ..
+
+    # Install service and nginx conf
+    - sudo cp etc/farkle-nginx.conf /etc/nginx/sites-available/farkle.conf
+    - sudo ln -sfn /etc/nginx/sites-available/farkle.conf /etc/nginx/sites-enabled/farkle.conf
+    - sudo cp etc/farkle-go.service /etc/systemd/system/farkle-go.service
+    - sudo systemctl daemon-reload
+
+    # Restart service and nginx
+    - sudo systemctl restart farkle-go.service
+    - sudo systemctl reload nginx

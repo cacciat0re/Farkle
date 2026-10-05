@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react'
 import { useGameStore } from '../store'
-import { startAmbient } from '../audio'
 
 interface TableStatus {
   id: string
@@ -67,7 +66,6 @@ export function Lobby() {
   const busyId = error ? null : joiningTableId
 
   const chooseTable = (table: TableStatus) => {
-    startAmbient()
     join(table.id)
   }
 
