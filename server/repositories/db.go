@@ -31,7 +31,7 @@ func OpenDB(dsn string) (*DB, error) {
 	sqlDB.SetMaxIdleConns(5)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
-	if err := gdb.AutoMigrate(&models.User{}, &models.MatchRecord{}); err != nil {
+	if err := gdb.AutoMigrate(&models.Table{}, &models.User{}, &models.MatchRecord{}); err != nil {
 		return nil, fmt.Errorf("迁移数据表: %w", err)
 	}
 	return &DB{gdb}, nil

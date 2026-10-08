@@ -5,11 +5,12 @@
 ```text
 server/
   main.go              # 仅负责配置、数据库、Hub、路由的装配
-  config/              # YAML 配置加载与静态配置类型
+  config/              # YAML 静态配置加载（数据库、HTTP）
+  sql/                 # 初始化脚本（seed_tables.sql 写入大厅桌子）
   models/              # 协议消息、对局状态、WebSocket DTO、持久化模型
   game/                # 纯 Farkle 计分规则，不依赖传输和存储
   services/            # Hub、Room、Peer 抽象和权威对局状态机
-  repositories/        # PostgreSQL / GORM 初始化与持久化入口
+  repositories/        # PostgreSQL / GORM 初始化、桌子列表等持久化入口
   routes/              # HTTP 路由、牌桌 WebSocket、大厅 WebSocket
   test/e2e/            # 手工端到端协议脚本
 ```

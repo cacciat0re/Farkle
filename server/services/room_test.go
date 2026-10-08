@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"farkle-server/config"
 	"farkle-server/models"
 )
 
@@ -64,8 +63,8 @@ func assertClientError(t *testing.T, c *fakePeer, want string) {
 	}
 }
 
-func testTableConfig() config.TableConfig {
-	return config.TableConfig{ID: "test-table", Name: "Test", MaxPlayers: config.MaxPlayersPerTable}
+func testTableConfig() models.Table {
+	return models.Table{ID: "test-table", Name: "Test", MaxPlayers: models.MaxPlayersPerTable}
 }
 
 func readRoomBroadcast(t *testing.T, room *Room) models.ServerMessage {

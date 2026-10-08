@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"farkle-server/config"
 	"farkle-server/models"
 	"farkle-server/services"
 
@@ -25,13 +24,9 @@ func newChatTestServer(t *testing.T) *httptest.Server {
 	}
 	_ = probe.Close()
 
-	cfg := &config.Config{}
-	cfg.Server.Addr = ":0"
-	cfg.Database.DSN = "unused"
-	cfg.Tables = []config.TableConfig{
-		{ID: "apple", Name: "Apple", MaxPlayers: config.MaxPlayersPerTable},
-	}
-	hub := services.NewHub(cfg)
+	hub := services.NewHub([]models.Table{
+		{ID: "apple", Name: "Apple", MaxPlayers: models.MaxPlayersPerTable},
+	})
 	srv := httptest.NewServer(NewRouter(hub))
 	t.Cleanup(srv.Close)
 	return srv

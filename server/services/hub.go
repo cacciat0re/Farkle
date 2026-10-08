@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"sync"
 
-	"farkle-server/config"
 	"farkle-server/models"
 )
 
@@ -12,38 +11,38 @@ import (
 type Hub struct {
 	mu           sync.RWMutex
 	Rooms        map[string]*Room
-	Config       *config.Config
+	tables       []models.Table // 启动时从数据库加载的桌子，保持大厅展示顺序
 	lobbyMu      sync.Mutex
 	lobbyClients map[LobbyPeer]struct{}
 }
 
-func NewHub(cfg *config.Config) *Hub {
+// NewHub 按数据库中的桌子列表预热所有房间（服务器满载 = 桌子数）
+func NewHub(tables []models.Table) *Hub {
 	h := &Hub{
 		Rooms:        make(map[string]*Room),
-		Config:       cfg,
+		tables:       tables,
 		lobbyClients: make(map[LobbyPeer]struct{}),
 	}
-	// 按配置预热所有桌子（服务器满载 = 配置中的桌子数）
-	for _, t := range cfg.Tables {
+	for _, t := range tables {
 		h.Rooms[t.ID] = NewRoom(t, h.BroadcastTables)
 		go h.Rooms[t.ID].Run()
 	}
 	return h
 }
 
-// GetRoom 仅返回配置中存在的桌子
+// GetRoom 仅返回已加载的桌子
 func (h *Hub) GetRoom(id string) *Room {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return h.Rooms[id]
 }
 
-// ListTables 返回所有桌子的实时状态（固定集合，不会动态增删）
+// ListTables 返回所有桌子的实时状态（固定集合，启动后不会动态增删）
 func (h *Hub) ListTables() []models.TableStatus {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	status := make([]models.TableStatus, 0, len(h.Config.Tables))
-	for _, t := range h.Config.Tables {
+	status := make([]models.TableStatus, 0, len(h.tables))
+	for _, t := range h.tables {
 		room := h.Rooms[t.ID]
 		players, inGame := room.Status()
 		status = append(status, models.TableStatus{

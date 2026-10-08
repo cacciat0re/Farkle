@@ -4,3 +4,6 @@ dist/
 .DS_Store
 /tmp/
 server/farkle-server
+
+# 本机服务端配置（模板见 server/config.default.yml）
+/server/config.yml

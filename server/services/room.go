@@ -10,7 +10,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"farkle-server/config"
 	"farkle-server/game"
 	"farkle-server/models"
 )
@@ -40,7 +39,7 @@ type Room struct {
 	onStatus    func()
 }
 
-func NewRoom(t config.TableConfig, onStatus func()) *Room {
+func NewRoom(t models.Table, onStatus func()) *Room {
 	return &Room{
 		ID:         t.ID,
 		Name:       t.Name,

@@ -1,0 +1,11 @@
+db:
+  dialect: postgres
+  host: localhost
+  port: 5432
+  username: postgres
+  password: ""
+  name: farkle
+  ssl_mode: disable
+
+server:
+  addr: ":8080"

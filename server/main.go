@@ -14,18 +14,25 @@ import (
 func main() {
 	log.SetOutput(os.Stdout)
 
-	cfg, err := config.LoadConfig("config.yaml")
+	cfg, err := config.LoadConfig(config.DefaultConfigPath)
 	if err != nil {
 		log.Fatalf("加载配置失败: %v", err)
 	}
 
-	// 当前对局运行时不依赖数据库；保留初始化以维持现有启动行为，
-	// 并为后续用户与对局记录落库预留。
-	if _, err := repositories.OpenDB(cfg.Database.DSN); err != nil {
+	db, err := repositories.OpenDB(cfg.Db.DSN())
+	if err != nil {
 		log.Fatalf("初始化数据库失败: %v", err)
 	}
 
-	hub := services.NewHub(cfg)
+	tables, err := repositories.NewTableRepository(db.DB).List()
+	if err != nil {
+		log.Fatalf("加载桌子失败: %v", err)
+	}
+	if len(tables) == 0 {
+		log.Fatal("数据库中没有桌子，请先执行 server/sql/seed_tables.sql")
+	}
+
+	hub := services.NewHub(tables)
 	handler := routes.NewRouter(hub)
 
 	log.Printf("Server listening on %s", cfg.Server.Addr)

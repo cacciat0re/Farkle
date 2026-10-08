@@ -13,6 +13,7 @@ build-deploy:
   tags: [deploy]
   script:
     # Compile
+    - export PATH=$PATH:/usr/local/go/bin
     - cd server && go build
     - sudo cp farkle-server /opt/arorms/farkle/
     - cd ..
