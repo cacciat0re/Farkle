@@ -4,13 +4,9 @@ import type { ThreeEvent } from '@react-three/fiber'
 import { createDiceFaceTexture } from './textures'
 import { useTrajectory } from './TrajectoryPlayer'
 import { useGameStore } from '../store'
-import { DIE_SIZE, DIE_STASH } from '../game/layout'
+import { DIE_SIZE, DIE_STASH, FACE_VALUES } from '../game/layout'
 
 const DIE = DIE_SIZE
-
-// BoxGeometry 材质面顺序：[+x, -x, +y, -y, +z, -z]
-// 约定：右3 左4 上1 下6 前2 后5（对面之和为 7）
-const FACE_VALUES = [3, 4, 1, 6, 2, 5]
 
 interface DieProps {
   index: number

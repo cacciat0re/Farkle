@@ -18,6 +18,10 @@ const (
 	MinPlayersToStart = 2 // 单人不许开局
 	RollTimeoutMillis = 12000
 	MaxChatLength     = 200 // 单条聊天最大字符数
+	// 客户端物理回放的步长：与前端 PHYSICS_DT（1/60 秒）一致
+	physicsStep = time.Second / 60
+	// 骰子停稳后额外等待的时间，让玩家看清落点再公布结果
+	rollSettleGrace = 400 * time.Millisecond
 )
 
 type Room struct {
@@ -206,12 +210,20 @@ func (r *Room) SendError(c Peer, err string) {
 
 func nowMs() int64 { return time.Now().UnixMilli() }
 
-func rollDie() int {
-	n, err := rand.Int(rand.Reader, big.NewInt(6))
+// randomIndex 返回 [0, n) 内的密码学随机数
+func randomIndex(n int) int {
+	if n <= 1 {
+		return 0
+	}
+	v, err := rand.Int(rand.Reader, big.NewInt(int64(n)))
 	if err != nil {
 		log.Fatal(err)
 	}
-	return int(n.Int64()) + 1
+	return int(v.Int64())
+}
+
+func rollDie() int {
+	return randomIndex(6) + 1
 }
 
 // ---- 游戏逻辑（服务端权威） ----
@@ -331,7 +343,8 @@ func (r *Room) startGame() {
 		p.HasBanked = false
 	}
 	r.State.Phase = models.PhaseRolling
-	r.State.CurrentTurn = 0
+	// 每局（包括「继续游戏」）都随机决定先手，不再固定为先加入的玩家
+	r.State.CurrentTurn = randomIndex(len(r.State.Players))
 	r.State.TurnScore = 0
 	r.State.LockedDice = []int{}
 	r.State.Selection = []int{}
@@ -428,17 +441,30 @@ func (r *Room) doRoll() {
 		for i := range fallback {
 			fallback[i] = rollDie()
 		}
-		r.applyRoll(fallback)
+		// 兜底投掷没有轨迹，客户端没有动画可等，立即公布
+		r.applyRoll(fallback, 0)
 	})
 }
 
-// applyRoll 结算一次投掷（来自客户端上报或服务端兜底）
-func (r *Room) applyRoll(dice []int) {
-	r.State.DiceValues = dice
-	isFarkle := game.BestScore(dice) == 0
+// applyRoll 结算一次投掷（来自客户端上报或服务端兜底）。
+// 轨迹先广播出去让全桌开始翻滚，阶段保持 rolling；等动画播完才公布点数，
+// 所以 farkle 和得分都不会抢在骰子停稳之前出现。
+func (r *Room) applyRoll(dice []int, animDelay time.Duration) {
 	gen := r.gen
+	r.BroadcastState()
+	r.After(animDelay, func() {
+		if r.gen != gen || r.State.Phase != models.PhaseRolling {
+			return
+		}
+		r.revealRoll(dice)
+	})
+}
 
-	if isFarkle {
+// revealRoll 公布本次投掷的点数：farkle 结束回合，否则进入选骰阶段
+func (r *Room) revealRoll(dice []int) {
+	r.State.DiceValues = dice
+	gen := r.gen
+	if game.BestScore(dice) == 0 {
 		r.State.TurnScore = 0
 		r.State.Farkled = true
 		r.State.Phase = models.PhaseTurnEnd
@@ -449,10 +475,20 @@ func (r *Room) applyRoll(dice []int) {
 			}
 			r.nextTurn()
 		})
-	} else {
-		r.State.Phase = models.PhaseScoring
-		r.BroadcastState()
+		return
 	}
+	r.State.Phase = models.PhaseScoring
+	r.BroadcastState()
+}
+
+// trajectoryAnimDelay 计算客户端回放这段轨迹需要的时长：
+// 播放头从第 0 帧走到末帧，每帧代表 stepsPerFrame 个物理步；再留一小段停顿让骰子看清落点
+func trajectoryAnimDelay(frames, stepsPerFrame int) time.Duration {
+	if frames < 2 {
+		return 0
+	}
+	play := time.Duration(frames-1) * time.Duration(stepsPerFrame) * physicsStep
+	return play + rollSettleGrace
 }
 
 // HandleRollResult 接收投掷者客户端上报的物理动画结果
@@ -487,13 +523,15 @@ func (r *Room) HandleRollResult(c Peer, m models.ClientMessage) {
 	// 关键帧轨迹：结构校验通过才接受（每帧 = 本次投掷的骰子数 × 7 个数）。
 	// 注意步长必须按实际骰子数算：锁骰后只剩 N 颗，帧长度是 N×7 而不是固定的 42。
 	stride := expected * models.TrajectoryNumbersPerDie
+	var animDelay time.Duration
 	if n := len(m.Trajectory); n > 0 && n%stride == 0 && n/stride <= models.MaxTrajectoryFrames &&
 		m.StepsPerFrame >= 1 && m.StepsPerFrame <= 60 {
 		r.State.Trajectory = m.Trajectory
 		r.State.TrajectoryDice = expected
 		r.State.StepsPerFrame = m.StepsPerFrame
+		animDelay = trajectoryAnimDelay(n/stride, m.StepsPerFrame)
 	}
-	r.applyRoll(m.Roll)
+	r.applyRoll(m.Roll, animDelay)
 }
 
 // validateKeep 校验一次锁定，返回得分、扣除所选后的散骰池与错误文案（空串表示合法）。

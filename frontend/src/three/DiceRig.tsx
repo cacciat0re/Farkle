@@ -6,8 +6,8 @@ import { createDiceFaceTexture } from './textures'
 import { selectableIndices } from '../game/scoring'
 import { hiddenIndices } from '../game/selection'
 import { useGameStore, useIsMyTurn } from '../store'
-import { NUMBERS_PER_DIE } from './trajectory'
-import { DIE_SIZE, lockedSlotX, lockedSlotZ } from '../game/layout'
+import { faceUpQuaternion, NUMBERS_PER_DIE } from './trajectory'
+import { DIE_SIZE, FACE_VALUES, lockedSlotX, lockedSlotZ } from '../game/layout'
 
 type Vec3 = [number, number, number]
 type Quat = [number, number, number, number]
@@ -24,26 +24,38 @@ interface FlyingDieItem {
   start: number
 }
 
-function slotQuaternion(index: number, opposite: boolean) {
-  const tilt = opposite ? Math.PI / 2.4 : -Math.PI / 2.4
-  return new THREE.Quaternion().setFromEuler(new THREE.Euler(tilt, 0, 0.15 * index))
+const UP_AXIS = new THREE.Vector3(0, 1, 0)
+
+/**
+ * 陈列姿态：点数为 value 的那一面朝上（与物理结算读取点数的规则一致），
+ * 再绕竖直轴转到槽位角度。这样骰子平放在桌上，不需要倾斜或翻滚。
+ */
+function slotQuaternion(index: number, value: number) {
+  const yaw = new THREE.Quaternion().setFromAxisAngle(UP_AXIS, 0.15 * index)
+  return yaw.multiply(faceUpQuaternion(value))
+}
+
+/** 陈列骰子的六面贴图：与托盘里的骰子使用同一套面序 */
+function useFaceTextures() {
+  return useMemo(() => FACE_VALUES.map((v) => createDiceFaceTexture(v)), [])
 }
 
 /** 已锁定的骰子：静态陈列在骰盘旁 */
 function LockedDie({ value, index, opposite }: { value: number; index: number; opposite: boolean }) {
-  const tex = useMemo(() => createDiceFaceTexture(value), [value])
-  const q = useMemo(() => slotQuaternion(index, opposite), [index, opposite])
+  const q = useMemo(() => slotQuaternion(index, value), [index, value])
+  const faces = useFaceTextures()
   return (
     <mesh castShadow position={[lockedSlotX(index), 0.23, lockedSlotZ(opposite)]} quaternion={q}>
       <boxGeometry args={[0.44, 0.44, 0.44]} />
-      <meshStandardMaterial map={tex} roughness={0.32} />
+      {faces.map((tex, i) => (
+        <meshStandardMaterial key={i} attach={`material-${i}`} map={tex} roughness={0.32} />
+      ))}
     </mesh>
   )
 }
 
-const FLY_MS = 680
-const _spin = new THREE.Quaternion()
-const SPIN_AXIS = new THREE.Vector3(1, 0, 0)
+const FLY_MS = 1150
+const ARC_HEIGHT = 1.6 // 抛物线弧顶高度
 
 /**
  * 锁定动画：从骰子在盘里的真实落点沿抛物线飞到陈列位。
@@ -69,7 +81,6 @@ function FlyingDie({
 }) {
   const group = useRef<THREE.Group>(null)
   const done = useRef(false)
-  const tex = useMemo(() => createDiceFaceTexture(value), [value])
   const fromV = useMemo(() => new THREE.Vector3(from[0], from[1], from[2]), [from])
   const fromQ = useMemo(
     () => new THREE.Quaternion(fromQuat[0], fromQuat[1], fromQuat[2], fromQuat[3]).normalize(),
@@ -79,18 +90,19 @@ function FlyingDie({
     () => new THREE.Vector3(lockedSlotX(index), 0.23, lockedSlotZ(opposite)),
     [index, opposite],
   )
-  const toQ = useMemo(() => slotQuaternion(index, opposite), [index, opposite])
+  const toQ = useMemo(() => slotQuaternion(index, value), [index, value])
+  const faces = useFaceTextures()
 
   useFrame(() => {
     const g = group.current
     if (!g) return
     const t = Math.min(1, (performance.now() - start) / FLY_MS)
-    const ease = 1 - Math.pow(1 - t, 3) // 起跳快、落地慢
+    // 三次缓入缓出：起步与落定都平滑，没有突然的加速或刹车
+    const ease = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
     g.position.lerpVectors(fromV, toV, ease)
-    g.position.y += Math.sin(Math.PI * t) * 0.75 // 抛物线弧顶
-    // 空中翻一整圈，落地时正好对齐陈列角度
-    _spin.setFromAxisAngle(SPIN_AXIS, Math.PI * 2 * (1 - ease))
-    g.quaternion.copy(fromQ).slerp(toQ, ease).premultiply(_spin)
+    g.position.y += Math.sin(Math.PI * t) * ARC_HEIGHT // 抛物线弧顶
+    // 起点与终点的朝上面相同，插值只是绕竖直方向转动，点数始终朝上，不翻滚
+    g.quaternion.copy(fromQ).slerp(toQ, ease)
     // 飞完由动画自己通知父级移除，不用定时器
     if (t >= 1 && !done.current) {
       done.current = true
@@ -102,7 +114,9 @@ function FlyingDie({
     <group ref={group} position={from} quaternion={fromQ}>
       <mesh castShadow>
         <boxGeometry args={[0.44, 0.44, 0.44]} />
-        <meshStandardMaterial map={tex} roughness={0.32} />
+        {faces.map((tex, i) => (
+          <meshStandardMaterial key={i} attach={`material-${i}`} map={tex} roughness={0.32} />
+        ))}
       </mesh>
     </group>
   )
@@ -145,11 +159,14 @@ export function DiceRig() {
     return poses
   }, [trajectory, stride])
 
-  // 换回合/重投时轨迹会被清空，这里留住上一投的落点，供锁定动画当起点
-  const lastRestPoses = useRef<RestPose[]>([])
+  // 上一投结算时的点数与落点快照。重投（ROLL_REQUESTED）会同时清空轨迹和 settledValues，
+  // 所以锁定动画必须用这里留住的快照，不能用当前的 settledValues
+  const lastRoll = useRef<{ values: number[]; poses: RestPose[] | null }>({ values: [], poses: null })
   useEffect(() => {
-    if (restPoses) lastRestPoses.current = restPoses
-  }, [restPoses])
+    if (settledValues.length > 0 && settledValues.every((v): v is number => v != null)) {
+      lastRoll.current = { values: settledValues, poses: restPoses }
+    }
+  }, [settledValues, restPoses])
 
   // 已锁定的骰子从骰盘隐藏：state.diceValues 是锁定后的剩余骰池
   const hiddenSet = useMemo(() => {
@@ -180,24 +197,23 @@ export function DiceRig() {
     }
     if (lockedDice.length === prev) return
 
-    // 托盘索引与锁定骰子的对应：按点数贪心匹配（与服务端扣池顺序一致）
+    // 新锁定的骰子来自上一投：在上一投的托盘快照里按点数贪心匹配，取它的落点作为起点
+    const { values, poses } = lastRoll.current
     const used = new Set<number>()
     const matchTray = (value: number) => {
-      for (let i = 0; i < settledValues.length; i++) {
-        if (settledValues[i] === value && !used.has(i)) {
+      for (let i = 0; i < values.length; i++) {
+        if (values[i] === value && !used.has(i)) {
           used.add(i)
           return i
         }
       }
       return -1
     }
-    for (const v of lockedDice.slice(0, prev)) matchTray(v)
 
-    const poses = lastRestPoses.current
     const start = performance.now()
     const items = lockedDice.slice(prev).map((value, k) => {
       const slot = prev + k
-      const pose = poses[matchTray(value)]
+      const pose = poses?.[matchTray(value)]
       return {
         key: `${slot}-${value}-${start}`,
         value,
@@ -208,7 +224,7 @@ export function DiceRig() {
       }
     })
     setFlying((f) => [...f, ...items])
-  }, [lockedDice, settledValues])
+  }, [lockedDice])
 
   const removeFlying = useCallback((key: string) => {
     setFlying((f) => f.filter((x) => x.key !== key))

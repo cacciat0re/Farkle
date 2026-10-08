@@ -324,3 +324,26 @@ func TestWaitingRoomLeaveRequiresTenSeconds(t *testing.T) {
 		t.Fatal("player should leave after ten seconds")
 	}
 }
+
+// 先手应随机：多局开局后两个座位都会轮到先手，且始终落在合法下标内
+func TestStartGameRandomizesFirstPlayer(t *testing.T) {
+	seen := map[int]bool{}
+	for i := 0; i < 40; i++ {
+		room := NewRoom(testTableConfig(), nil)
+		pa := &models.Player{ID: "a", Name: "Alice"}
+		pb := &models.Player{ID: "b", Name: "Bob"}
+		room.Players["a"] = pa
+		room.Players["b"] = pb
+		room.Order = []string{"a", "b"}
+		room.rebuildPlayerList()
+
+		room.startGame()
+		if room.State.CurrentTurn < 0 || room.State.CurrentTurn >= len(room.State.Players) {
+			t.Fatalf("先手下标越界: %d", room.State.CurrentTurn)
+		}
+		seen[room.State.CurrentTurn] = true
+	}
+	if len(seen) != 2 {
+		t.Fatalf("40 局内应该两个座位都出现过先手，实际 %v", seen)
+	}
+}

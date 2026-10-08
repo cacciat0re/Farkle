@@ -54,6 +54,9 @@ export function HUD() {
   // 首次入库有 300 分门槛：没到门槛就别让按钮点下去，避免服务端拒绝
   const projectedTurnScore = state.turnScore + (hasSelection && selectedIsValid ? selectedScore : 0)
   const canBank = currentPlayer?.hasBanked || projectedTurnScore >= MIN_BANK_SCORE
+  // 骰子滚动中不显示底部操作区；只有轮到自己选骰、等待、对局结束或等待对手时才有内容
+  const showActions =
+    state.phase !== 'rolling' && (state.phase === 'waiting' || state.phase === 'gameOver' || scoring || !isMyTurn)
 
   return (
     <div className="hud">
@@ -107,54 +110,56 @@ export function HUD() {
         )}
       </div>
 
-      {/* 底部操作区 */}
-      <div className="actions parchment">
-        {state.phase === 'waiting' && (
-          <>
-            <div className="wait">已准备 {readyCount}/{state.players.length}</div>
-            <button className="btn primary" onClick={playerReady} disabled={iAmReadyToStart}>
-              {iAmReadyToStart ? '已准备，等待对手' : '准备'}
-            </button>
-            <button className="btn" onClick={leaveTable} disabled={!canLeave || leaving}>
-              {leaving ? '正在退出...' : canLeave ? '退出房间' : `退出房间（${leaveSeconds}s）`}
-            </button>
-          </>
-        )}
+      {/* 底部操作区：滚动中或没有可做的事时整块隐藏，避免空框残留 */}
+      {showActions && (
+        <div className="actions parchment">
+          {state.phase === 'waiting' && (
+            <>
+              <div className="wait">已准备 {readyCount}/{state.players.length}</div>
+              <button className="btn primary" onClick={playerReady} disabled={iAmReadyToStart}>
+                {iAmReadyToStart ? '已准备，等待对手' : '准备'}
+              </button>
+              <button className="btn" onClick={leaveTable} disabled={!canLeave || leaving}>
+                {leaving ? '正在退出...' : canLeave ? '退出房间' : `退出房间（${leaveSeconds}s）`}
+              </button>
+            </>
+          )}
 
-        {scoring && (
-          <>
-            <button
-              className="btn primary"
-              disabled={!hasSelection || !selectedIsValid}
-              onClick={keepAndRoll}
-            >
-              选择并投掷{hasSelection && selectedIsValid ? `（+${selectedScore}）` : ''}
-            </button>
-            <button
-              className="btn gold"
-              disabled={!hasSelection || !selectedIsValid || !canBank}
-              onClick={keepAndBank}
-            >
-              选择并结束回合{hasSelection && selectedIsValid ? `（+${selectedScore}）` : ''}
-            </button>
-          </>
-        )}
+          {scoring && (
+            <>
+              <button
+                className="btn primary"
+                disabled={!hasSelection || !selectedIsValid}
+                onClick={keepAndRoll}
+              >
+                选择并投掷{hasSelection && selectedIsValid ? `（+${selectedScore}）` : ''}
+              </button>
+              <button
+                className="btn gold"
+                disabled={!hasSelection || !selectedIsValid || !canBank}
+                onClick={keepAndBank}
+              >
+                选择并结束回合{hasSelection && selectedIsValid ? `（+${selectedScore}）` : ''}
+              </button>
+            </>
+          )}
 
-        {state.phase === 'gameOver' && (
-          <>
-            <button className="btn primary" onClick={rematchReady} disabled={iAmReady}>
-              {iAmReady ? '等待对手选择' : opponentReadyForRematch ? '继续游戏（对手已选择）' : '继续游戏'}
-            </button>
-            <button className="btn" onClick={leaveTable}>
-              退出到大厅
-            </button>
-          </>
-        )}
+          {state.phase === 'gameOver' && (
+            <>
+              <button className="btn primary" onClick={rematchReady} disabled={iAmReady}>
+                {iAmReady ? '等待对手选择' : opponentReadyForRematch ? '继续游戏（对手已选择）' : '继续游戏'}
+              </button>
+              <button className="btn" onClick={leaveTable}>
+                退出到大厅
+              </button>
+            </>
+          )}
 
-        {state.phase !== 'waiting' && !isMyTurn && state.phase !== 'gameOver' && (
-          <div className="wait">等待 {currentPlayer?.name} 行动…</div>
-        )}
-      </div>
+          {state.phase !== 'waiting' && !isMyTurn && state.phase !== 'gameOver' && (
+            <div className="wait">等待 {currentPlayer?.name} 行动…</div>
+          )}
+        </div>
+      )}
 
       {error && (
         <div className="toast error" onClick={dismissError}>

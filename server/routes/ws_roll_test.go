@@ -46,8 +46,9 @@ func readStatePhase(t *testing.T, conn *websocket.Conn, phase models.Phase, dead
 	}
 }
 
-// setupRollingTable 让两名玩家入座并准备，返回投掷者连接与旁观者连接
-func setupRollingTable(t *testing.T, srv *httptest.Server) (*websocket.Conn, *websocket.Conn, models.ServerMessage) {
+// setupRollingTable 让两名玩家入座并准备。先手随机，所以按 ROLL_REQUESTED 里的
+// currentTurn 决定谁是投掷者：返回投掷者与旁观者连接、投掷者 ID 及首次投掷请求。
+func setupRollingTable(t *testing.T, srv *httptest.Server) (roller, watcher *websocket.Conn, rollerID string, rolled models.ServerMessage) {
 	t.Helper()
 	alice := dialTable(t, srv, "apple")
 	sendWS(t, alice, models.ClientMessage{Type: "JOIN_ROOM", PlayerID: "a", Name: "Alice", RoomID: "apple"})
@@ -62,11 +63,18 @@ func setupRollingTable(t *testing.T, srv *httptest.Server) (*websocket.Conn, *we
 	readUntilType(t, alice, "GAME_STATE", 2*time.Second)
 	sendWS(t, bob, models.ClientMessage{Type: "PLAYER_READY", PlayerID: "b", RoomID: "apple"})
 
-	rolled := readUntilType(t, alice, "ROLL_REQUESTED", 2*time.Second)
+	rolled = readUntilType(t, alice, "ROLL_REQUESTED", 2*time.Second)
 	if len(rolled.Roll) != 2 {
 		t.Fatalf("ROLL_REQUESTED 应带 [骰子数, 种子]，实际 %v", rolled.Roll)
 	}
-	return alice, bob, rolled
+	if rolled.State == nil || len(rolled.State.Players) != 2 {
+		t.Fatalf("ROLL_REQUESTED 应携带牌桌状态，实际 %+v", rolled.State)
+	}
+	rollerID = rolled.State.Players[rolled.State.CurrentTurn].ID
+	if rollerID == "a" {
+		return alice, bob, rollerID, rolled
+	}
+	return bob, alice, rollerID, rolled
 }
 
 func trajectoryFor(dice, frames int) []float64 {
@@ -81,25 +89,26 @@ func trajectoryFor(dice, frames int) []float64 {
 // 投掷者上报的轨迹消息有几十 KB，必须能被服务端收下并且不断开连接。
 func TestWebSocketAcceptsLargeTrajectoryResult(t *testing.T) {
 	srv := newChatTestServer(t)
-	alice, bob, rolled := setupRollingTable(t, srv)
+	roller, watcher, rollerID, rolled := setupRollingTable(t, srv)
 	if rolled.Roll[0] != 6 {
 		t.Fatalf("开局应投 6 颗，实际 %d", rolled.Roll[0])
 	}
 
 	const frames = 60 // 6 颗 × 60 帧 × 7 个数 ≈ 45KB JSON，远超旧的 4KB 读上限
 	traj := trajectoryFor(6, frames)
-	sendWS(t, alice, models.ClientMessage{
-		Type: "ROLL_RESULT", PlayerID: "a", RoomID: "apple",
+	sendWS(t, roller, models.ClientMessage{
+		Type: "ROLL_RESULT", PlayerID: rollerID, RoomID: "apple",
 		Roll: []int{1, 2, 3, 4, 5, 6}, Trajectory: traj, StepsPerFrame: 3,
 	})
 
-	state := readStatePhase(t, alice, models.PhaseScoring, 3*time.Second)
+	// 60 帧约 3 秒回放，结果要等动画播完才公布，deadline 留足余量
+	state := readStatePhase(t, roller, models.PhaseScoring, 6*time.Second)
 	if len(state.Trajectory) != len(traj) || state.TrajectoryDice != 6 || state.StepsPerFrame != 3 {
 		t.Fatalf("轨迹应原样广播给全桌: dice=%d len=%d steps=%d",
 			state.TrajectoryDice, len(state.Trajectory), state.StepsPerFrame)
 	}
 	// 旁观者同样要拿到完整轨迹（否则对面看不到投掷过程）
-	observed := readStatePhase(t, bob, models.PhaseScoring, 3*time.Second)
+	observed := readStatePhase(t, watcher, models.PhaseScoring, 6*time.Second)
 	if len(observed.Trajectory) != len(traj) {
 		t.Fatalf("旁观者应收到完整轨迹，实际 %d", len(observed.Trajectory))
 	}
@@ -108,33 +117,62 @@ func TestWebSocketAcceptsLargeTrajectoryResult(t *testing.T) {
 // 锁骰后只剩 N 颗，轨迹步长必须按 N×7 校验，不能写死 6×7。
 func TestTrajectoryStrideFollowsRemainingDice(t *testing.T) {
 	srv := newChatTestServer(t)
-	alice, _, _ := setupRollingTable(t, srv)
+	roller, _, rollerID, _ := setupRollingTable(t, srv)
 
-	sendWS(t, alice, models.ClientMessage{
-		Type: "ROLL_RESULT", PlayerID: "a", RoomID: "apple",
+	sendWS(t, roller, models.ClientMessage{
+		Type: "ROLL_RESULT", PlayerID: rollerID, RoomID: "apple",
 		Roll: []int{1, 2, 3, 4, 5, 6}, Trajectory: trajectoryFor(6, 20), StepsPerFrame: 3,
 	})
-	readStatePhase(t, alice, models.PhaseScoring, 3*time.Second)
+	readStatePhase(t, roller, models.PhaseScoring, 3*time.Second)
 
 	// 锁定一颗 1，剩 5 颗继续投
-	sendWS(t, alice, models.ClientMessage{Type: "KEEP_DICE", PlayerID: "a", RoomID: "apple", Keep: []int{1}})
-	kept := readStatePhase(t, alice, models.PhaseScoring, 3*time.Second)
+	sendWS(t, roller, models.ClientMessage{Type: "KEEP_DICE", PlayerID: rollerID, RoomID: "apple", Keep: []int{1}})
+	kept := readStatePhase(t, roller, models.PhaseScoring, 3*time.Second)
 	if len(kept.LockedDice) != 1 {
 		t.Fatalf("应已锁定 1 颗骰子，实际 %v", kept.LockedDice)
 	}
 
-	sendWS(t, alice, models.ClientMessage{Type: "ROLL_DICE", PlayerID: "a", RoomID: "apple"})
-	next := readUntilType(t, alice, "ROLL_REQUESTED", 2*time.Second)
+	sendWS(t, roller, models.ClientMessage{Type: "ROLL_DICE", PlayerID: rollerID, RoomID: "apple"})
+	next := readUntilType(t, roller, "ROLL_REQUESTED", 2*time.Second)
 	if next.Roll[0] != 5 {
 		t.Fatalf("锁 1 颗后应投 5 颗，实际 %d", next.Roll[0])
 	}
 
-	sendWS(t, alice, models.ClientMessage{
-		Type: "ROLL_RESULT", PlayerID: "a", RoomID: "apple",
+	sendWS(t, roller, models.ClientMessage{
+		Type: "ROLL_RESULT", PlayerID: rollerID, RoomID: "apple",
 		Roll: []int{2, 3, 4, 5, 6}, Trajectory: trajectoryFor(5, 20), StepsPerFrame: 3,
 	})
-	state := readStatePhase(t, alice, models.PhaseScoring, 3*time.Second)
+	state := readStatePhase(t, roller, models.PhaseScoring, 3*time.Second)
 	if state.TrajectoryDice != 5 || len(state.Trajectory) != 20*5*models.TrajectoryNumbersPerDie {
 		t.Fatalf("5 颗骰子的轨迹应被接受: dice=%d len=%d", state.TrajectoryDice, len(state.Trajectory))
+	}
+}
+
+// farkle 也要等轨迹播完才公布：回放期间不能先出现 turnEnd
+func TestFarkleWaitsForRollAnimation(t *testing.T) {
+	srv := newChatTestServer(t)
+	roller, _, rollerID, _ := setupRollingTable(t, srv)
+
+	const frames = 40 // 39 个间隔 × 3 步 / 60 ≈ 1.95 秒回放
+	sent := time.Now()
+	sendWS(t, roller, models.ClientMessage{
+		Type: "ROLL_RESULT", PlayerID: rollerID, RoomID: "apple",
+		Roll: []int{2, 3, 4, 6, 2, 4}, Trajectory: trajectoryFor(6, frames), StepsPerFrame: 3,
+	})
+	animEnd := sent.Add(time.Duration(frames-1) * 3 * time.Second / 60)
+
+	end := time.Now().Add(6 * time.Second)
+	for {
+		msg := readUntilType(t, roller, "GAME_STATE", time.Until(end))
+		if msg.State == nil || msg.State.Phase != models.PhaseTurnEnd {
+			continue
+		}
+		if time.Now().Before(animEnd) {
+			t.Fatalf("farkle 不应早于动画结束公布，提前了 %v", animEnd.Sub(time.Now()))
+		}
+		if !msg.State.Farkled {
+			t.Fatalf("turnEnd 应带 farkled 标记")
+		}
+		return
 	}
 }
