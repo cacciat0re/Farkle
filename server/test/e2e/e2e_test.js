@@ -1,9 +1,10 @@
-// 端到端协议测试：node e2e_test.js（需服务端运行在 :8080）
+// 端到端协议测试：node e2e_test.js（需服务端运行在 :8086）
 // 新协议：ROLL_REQUESTED → 客户端物理动画 → ROLL_RESULT 上报点数
 const WebSocket = require('ws')
 
 const room = 'apple'
-const url = `ws://localhost:8080/ws/${room}`
+const baseUrl = process.env.FARKLE_WS_URL || 'ws://localhost:8086'
+const url = `${baseUrl}/ws/${room}`
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const send = (c, msg) => c.ws.send(JSON.stringify(msg))
 

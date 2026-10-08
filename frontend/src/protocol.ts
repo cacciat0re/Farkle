@@ -29,6 +29,8 @@ export interface GameState {
   diceValues: number[]
   lockedDice: number[]
   turnScore: number
+  rollDice: number // 本次投掷的骰子数量（选择下标的上界）
+  selection: number[] // 当前玩家选中的骰子下标（全桌可见）
   rollCount: number
   winner?: string
   farkled: boolean
@@ -50,15 +52,20 @@ export type ClientMessage =
   | { type: 'ROLL_DICE'; playerId: string; roomId: string }
   | { type: 'ROLL_RESULT'; playerId: string; roomId: string; roll: number[]; poses?: DiePose[]; trajectory?: number[]; stepsPerFrame?: number } // 上报物理动画最终点数与姿态
   | { type: 'KEEP_DICE'; playerId: string; roomId: string; keep: number[] }
+  | { type: 'KEEP_AND_ROLL'; playerId: string; roomId: string; keep: number[] } // 选择并投掷
+  | { type: 'KEEP_AND_BANK'; playerId: string; roomId: string; keep: number[] } // 选择并结束回合
+  | { type: 'SELECT_DICE'; playerId: string; roomId: string; select: number[] } // 只广播选择，供对手查看
   | { type: 'BANK_SCORE'; playerId: string; roomId: string }
   | { type: 'REMATCH_READY'; playerId: string; roomId: string }
   | { type: 'LEAVE_TABLE'; playerId: string; roomId: string }
   | { type: 'CHAT'; playerId: string; roomId: string; text: string }
 
 export interface ServerMessage {
-  type: 'GAME_STATE' | 'ROLL_REQUESTED' | 'CHAT' | 'ERROR' | 'ROOM_LEFT'
+  type: 'GAME_STATE' | 'ROLL_REQUESTED' | 'SELECTION' | 'CHAT' | 'ERROR' | 'ROOM_LEFT'
   state?: GameState
   roll?: number[] // ROLL_REQUESTED 时携带 [骰子数量, 随机种子]
+  selection?: number[] // SELECTION 时携带当前玩家选中的骰子下标
+  rollId?: number // SELECTION 对应哪一次投掷
   chat?: ChatMessage
   error?: string
   playerId?: string

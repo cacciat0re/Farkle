@@ -1,113 +1,36 @@
-package main
+package services
 
 import (
 	"crypto/rand"
 	"encoding/json"
 	"log"
 	"math/big"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"farkle-server/config"
+	"farkle-server/game"
+	"farkle-server/models"
 )
 
 const (
-	StateWaiting  = "waiting"
-	StateRolling  = "rolling"
-	StateScoring  = "scoring"
-	StateTurnEnd  = "turnEnd"
-	StateGameOver = "gameOver"
-
-	TargetScore       = 3000
-	MinBankScore      = 300 // 首次入库最低分（经典规则）
-	MinPlayersToStart = 2   // 单人不许开局
+	MinPlayersToStart = 2 // 单人不许开局
 	RollTimeoutMillis = 12000
 	MaxChatLength     = 200 // 单条聊天最大字符数
-
-	// 关键帧轨迹：每颗骰子每帧 7 个数（x,y,z,qx,qy,qz,qw）
-	TrajectoryNumbersPerDie = 7
-	MaxTrajectoryFrames     = 400 // 上限保护：400 帧 ≈ 20 秒，远大于正常投掷
 )
-
-type Player struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Score     int    `json:"score"`
-	HasBanked bool   `json:"hasBanked"` // 本局是否已首次入库
-	JoinedAt  int64  `json:"-"`
-}
-
-type GameState struct {
-	RoomID         string    `json:"roomId"`
-	Phase          string    `json:"phase"`
-	Players        []*Player `json:"players"`
-	CurrentTurn    int       `json:"currentTurn"` // 玩家索引
-	DiceValues     []int     `json:"diceValues"`  // 当前散骰
-	LockedDice     []int     `json:"lockedDice"`  // 已锁定骰子（值）
-	TurnScore      int       `json:"turnScore"`   // 本回合已累积（未入库）
-	RollCount      int       `json:"rollCount"`
-	Winner         string    `json:"winner,omitempty"`
-	Farkled        bool      `json:"farkled"`                  // 本回合是否爆牌
-	LastBanked     int       `json:"lastBanked"`               // 上一次入库得分
-	RollID         int       `json:"rollId"`                   // 每次投掷递增
-	AnimatingTill  int64     `json:"animatingTill"`            // 投掷超时兜底截止 unix ms
-	RematchReady   []string  `json:"rematchReady"`             // 已选择继续游戏的玩家
-	ReadyPlayers   []string  `json:"readyPlayers"`             // 已点击准备的玩家
-	KeptThisRoll   bool      `json:"keptThisRoll"`             // 本次投掷后是否已锁定至少一颗骰子
-	DicePoses      []DiePose `json:"dicePoses,omitempty"`      // 本轮权威姿态（投掷者上报，全桌对齐用）
-	Trajectory     []float64 `json:"trajectory,omitempty"`     // 本轮关键帧轨迹（扁平：每帧 N×7 个数）
-	TrajectoryDice int       `json:"trajectoryDice,omitempty"` // 轨迹里每帧包含的骰子数
-	StepsPerFrame  int       `json:"stepsPerFrame,omitempty"`  // 每个关键帧间隔的物理步数
-}
-
-// DiePose 一颗骰子停稳后的姿态（位置 + 四元数）
-type DiePose struct {
-	P [3]float64 `json:"p"`
-	Q [4]float64 `json:"q"`
-}
-
-type ClientMessage struct {
-	Type          string    `json:"type"`
-	PlayerID      string    `json:"playerId"`
-	Name          string    `json:"name,omitempty"`
-	RoomID        string    `json:"roomId"`
-	Keep          []int     `json:"keep,omitempty"`       // 要锁定的骰子值
-	Roll          []int     `json:"roll,omitempty"`       // 客户端物理动画的最终点数
-	Poses         []DiePose `json:"poses,omitempty"`      // 客户端物理动画的最终姿态
-	Trajectory    []float64 `json:"trajectory,omitempty"` // 预计算的关键帧轨迹
-	StepsPerFrame int       `json:"stepsPerFrame,omitempty"`
-	Text          string    `json:"text,omitempty"` // 聊天内容
-}
-
-// ChatMessage 一条桌内消息：玩家发言或系统事件（加入/离开）
-type ChatMessage struct {
-	Kind      string `json:"kind"` // "chat" 玩家发言 / "system" 系统事件
-	PlayerID  string `json:"playerId,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Text      string `json:"text"`
-	Timestamp int64  `json:"timestamp"`
-}
-
-type ServerMessage struct {
-	Type      string       `json:"type"`
-	State     *GameState   `json:"state,omitempty"`
-	Roll      []int        `json:"roll,omitempty"`
-	Chat      *ChatMessage `json:"chat,omitempty"`
-	Error     string       `json:"error,omitempty"`
-	PlayerID  string       `json:"playerId,omitempty"`
-	RoomID    string       `json:"roomId,omitempty"`
-	Timestamp int64        `json:"timestamp"`
-}
 
 type Room struct {
 	ID          string
 	Name        string
 	MaxPlayers  int
-	Clients     map[*Client]bool
-	Players     map[string]*Player // playerID -> player
-	Order       []string           // 稳定的玩家顺序（加入先后），currentTurn 按下标引用
-	State       GameState
-	Register    chan *Client
-	Unregister  chan *Client
+	Clients     map[Peer]bool
+	Players     map[string]*models.Player // playerID -> player
+	Order       []string                  // 稳定的玩家顺序（加入先后），currentTurn 按下标引用
+	State       models.GameState
+	Register    chan Peer
+	Unregister  chan Peer
 	Broadcast   chan []byte
 	Actions     chan func() // 所有游戏逻辑串行化到此执行，避免竞态
 	done        chan struct{}
@@ -117,33 +40,36 @@ type Room struct {
 	onStatus    func()
 }
 
-func NewRoom(t TableConfig, onStatus func()) *Room {
+func NewRoom(t config.TableConfig, onStatus func()) *Room {
 	return &Room{
 		ID:         t.ID,
 		Name:       t.Name,
 		MaxPlayers: t.MaxPlayers,
-		Clients:    make(map[*Client]bool),
-		Players:    make(map[string]*Player),
+		Clients:    make(map[Peer]bool),
+		Players:    make(map[string]*models.Player),
 		Order:      []string{},
-		Register:   make(chan *Client),
-		Unregister: make(chan *Client),
+		Register:   make(chan Peer),
+		Unregister: make(chan Peer),
 		Broadcast:  make(chan []byte, 64),
 		Actions:    make(chan func(), 256),
 		done:       make(chan struct{}),
 		onStatus:   onStatus,
-		State: GameState{
+		State: models.GameState{
 			RoomID:       t.ID,
-			Phase:        StateWaiting,
+			Phase:        models.PhaseWaiting,
 			DiceValues:   []int{},
 			LockedDice:   []int{},
 			RematchReady: []string{},
 			ReadyPlayers: []string{},
-			Players:      []*Player{},
+			Players:      []*models.Player{},
 		},
 	}
 }
 
 func (r *Room) IsEmpty() bool { return len(r.Clients) == 0 }
+
+// Done 返回房间关闭信号，供传输层在房间退出时停止排队。
+func (r *Room) Done() <-chan struct{} { return r.done }
 
 // Status 返回可供大厅 API 安全读取的桌子状态
 func (r *Room) Status() (int, bool) {
@@ -153,7 +79,7 @@ func (r *Room) Status() (int, bool) {
 func (r *Room) updateStatus() {
 	playerCount := int32(len(r.Players))
 	phase := r.State.Phase
-	inGame := phase != "" && phase != StateWaiting && phase != StateGameOver
+	inGame := phase != "" && phase != models.PhaseWaiting && phase != models.PhaseGameOver
 	countChanged := r.playerCount.Swap(playerCount) != playerCount
 	gameChanged := r.inGame.Swap(inGame) != inGame
 	if (countChanged || gameChanged) && r.onStatus != nil {
@@ -185,13 +111,11 @@ func (r *Room) Run() {
 			f()
 		case msg := <-r.Broadcast:
 			for c := range r.Clients {
-				if c.PlayerID == "" {
+				if c.PlayerID() == "" {
 					continue
 				}
-				select {
-				case c.Send <- msg:
-				default:
-					close(c.Send)
+				if !c.Push(msg) {
+					c.Close()
 					delete(r.Clients, c)
 				}
 			}
@@ -200,7 +124,7 @@ func (r *Room) Run() {
 }
 
 func (r *Room) rebuildPlayerList() {
-	players := make([]*Player, 0, len(r.Order))
+	players := make([]*models.Player, 0, len(r.Order))
 	for _, id := range r.Order {
 		if p, ok := r.Players[id]; ok {
 			players = append(players, p)
@@ -208,11 +132,17 @@ func (r *Room) rebuildPlayerList() {
 	}
 	r.State.Players = players
 	if len(players) == 0 {
-		r.State.Phase = StateWaiting
+		r.State.Phase = models.PhaseWaiting
 		r.State.CurrentTurn = 0
 		r.State.DiceValues = []int{}
 		r.State.LockedDice = []int{}
 		r.State.TurnScore = 0
+		r.State.Selection = []int{}
+		r.State.RollDice = 0
+		r.State.Trajectory = nil
+		r.State.TrajectoryDice = 0
+		r.State.StepsPerFrame = 0
+		r.State.DicePoses = nil
 		r.State.KeptThisRoll = false
 	}
 	if r.State.CurrentTurn >= len(players) {
@@ -223,17 +153,17 @@ func (r *Room) rebuildPlayerList() {
 func (r *Room) BroadcastState() {
 	r.rebuildPlayerList()
 	r.updateStatus()
-	payload, _ := json.Marshal(ServerMessage{Type: "GAME_STATE", State: &r.State, Timestamp: nowMs()})
+	payload, _ := json.Marshal(models.ServerMessage{Type: "GAME_STATE", State: &r.State, Timestamp: nowMs()})
 	r.Broadcast <- payload
 }
 
 // broadcastChat 向桌内所有客户端推送一条聊天或系统事件；
 // 队列满时直接丢弃，绝不阻塞房间的事件循环。
-func (r *Room) broadcastChat(chat ChatMessage) {
+func (r *Room) broadcastChat(chat models.ChatMessage) {
 	if chat.Timestamp == 0 {
 		chat.Timestamp = nowMs()
 	}
-	payload, err := json.Marshal(ServerMessage{Type: "CHAT", Chat: &chat, Timestamp: nowMs()})
+	payload, err := json.Marshal(models.ServerMessage{Type: "CHAT", Chat: &chat, Timestamp: nowMs()})
 	if err != nil {
 		return
 	}
@@ -245,12 +175,19 @@ func (r *Room) broadcastChat(chat ChatMessage) {
 
 func (r *Room) resetToWaiting() {
 	r.gen++
-	r.State.Phase = StateWaiting
+	r.State.Phase = models.PhaseWaiting
 	r.State.CurrentTurn = 0
 	r.State.DiceValues = []int{}
 	r.State.LockedDice = []int{}
 	r.State.TurnScore = 0
+	r.State.Selection = []int{}
+	r.State.RollDice = 0
 	r.State.RollCount = 0
+	// 上一局的轨迹必须一起清掉，否则等待中的房间还会把旧骰子摆回桌面
+	r.State.Trajectory = nil
+	r.State.TrajectoryDice = 0
+	r.State.StepsPerFrame = 0
+	r.State.DicePoses = nil
 	r.State.Winner = ""
 	r.State.Farkled = false
 	r.State.LastBanked = 0
@@ -263,12 +200,9 @@ func (r *Room) resetToWaiting() {
 	}
 }
 
-func (r *Room) SendError(c *Client, err string) {
-	payload, _ := json.Marshal(ServerMessage{Type: "ERROR", Error: err, Timestamp: nowMs()})
-	select {
-	case c.Send <- payload:
-	default:
-	}
+func (r *Room) SendError(c Peer, err string) {
+	payload, _ := json.Marshal(models.ServerMessage{Type: "ERROR", Error: err, Timestamp: nowMs()})
+	c.Push(payload)
 }
 
 func nowMs() int64 { return time.Now().UnixMilli() }
@@ -283,20 +217,20 @@ func rollDie() int {
 
 // ---- 游戏逻辑（服务端权威） ----
 
-func (r *Room) HandleJoin(c *Client, m ClientMessage) {
+func (r *Room) HandleJoin(c Peer, m models.ClientMessage) {
 	for existing := range r.Clients {
-		if existing != c && existing.PlayerID == m.PlayerID {
+		if existing != c && existing.PlayerID() == m.PlayerID {
 			r.SendError(c, "该玩家已在桌内")
 			return
 		}
 	}
 	// 已在桌内的同一玩家重连：不重复加入
 	if _, ok := r.Players[m.PlayerID]; ok {
-		c.PlayerID = m.PlayerID
+		c.SetPlayerID(m.PlayerID)
 		r.BroadcastState()
 		return
 	}
-	if r.State.Phase != StateWaiting && r.State.Phase != StateGameOver {
+	if r.State.Phase != models.PhaseWaiting && r.State.Phase != models.PhaseGameOver {
 		r.SendError(c, "对局进行中，不能中途加入")
 		return
 	}
@@ -304,52 +238,53 @@ func (r *Room) HandleJoin(c *Client, m ClientMessage) {
 		r.SendError(c, "这张桌子已满")
 		return
 	}
-	player := &Player{ID: m.PlayerID, Name: m.Name, Score: 0, JoinedAt: nowMs()}
+	player := &models.Player{ID: m.PlayerID, Name: m.Name, Score: 0, JoinedAt: nowMs()}
 	if player.Name == "" {
 		player.Name = "traveler"
 	}
 	r.Players[m.PlayerID] = player
 	r.Order = append(r.Order, m.PlayerID)
-	c.PlayerID = m.PlayerID
+	c.SetPlayerID(m.PlayerID)
 	r.rebuildPlayerList()
-	if r.State.Phase == "" || r.State.Phase == StateWaiting {
-		r.State.Phase = StateWaiting
+	if r.State.Phase == "" || r.State.Phase == models.PhaseWaiting {
+		r.State.Phase = models.PhaseWaiting
 	}
 	r.BroadcastState()
-	r.broadcastChat(ChatMessage{Kind: "system", Text: player.Name + " 加入了牌桌"})
+	r.broadcastChat(models.ChatMessage{Kind: "system", Text: player.Name + " 加入了牌桌"})
 }
 
-func (r *Room) removePlayer(c *Client) {
+func (r *Room) removePlayer(c Peer) {
 	// 即使该 client 已经因发送队列溢出被移出 Clients，也必须按玩家 ID 清理，
 	// 否则会留下永远占座的“幽灵玩家”。
 	delete(r.Clients, c)
-	p, ok := r.Players[c.PlayerID]
+	playerID := c.PlayerID()
+	p, ok := r.Players[playerID]
 	if !ok {
 		return
 	}
-	delete(r.Players, c.PlayerID)
+	delete(r.Players, playerID)
 	for i, id := range r.Order {
-		if id == c.PlayerID {
+		if id == playerID {
 			r.Order = append(r.Order[:i], r.Order[i+1:]...)
 			break
 		}
 	}
 	log.Printf("player %s left room %s", p.Name, r.ID)
-	r.State.ReadyPlayers = removePlayerID(r.State.ReadyPlayers, c.PlayerID)
-	if r.State.Phase != StateWaiting {
+	r.State.ReadyPlayers = removePlayerID(r.State.ReadyPlayers, playerID)
+	if r.State.Phase != models.PhaseWaiting {
 		r.resetToWaiting()
 	}
 	r.rebuildPlayerList()
 	r.BroadcastState()
-	r.broadcastChat(ChatMessage{Kind: "system", Text: p.Name + " 离开了牌桌"})
+	r.broadcastChat(models.ChatMessage{Kind: "system", Text: p.Name + " 离开了牌桌"})
 }
 
-func (r *Room) HandleLeave(c *Client, m ClientMessage) {
-	if r.State.Phase != StateWaiting {
+func (r *Room) HandleLeave(c Peer, m models.ClientMessage) {
+	if r.State.Phase != models.PhaseWaiting {
 		r.SendError(c, "对局期间不能退出房间")
 		return
 	}
-	p, ok := r.Players[c.PlayerID]
+	p, ok := r.Players[c.PlayerID()]
 	if !ok {
 		r.SendError(c, "你不在当前牌桌")
 		return
@@ -360,23 +295,18 @@ func (r *Room) HandleLeave(c *Client, m ClientMessage) {
 	}
 
 	r.removePlayer(c)
-	payload, _ := json.Marshal(ServerMessage{Type: "ROOM_LEFT", Timestamp: nowMs()})
-	select {
-	case c.Send <- payload:
-	default:
-	}
-	if c.Conn != nil {
-		go func() {
-			time.Sleep(100 * time.Millisecond)
-			c.Conn.Close()
-		}()
-	}
+	payload, _ := json.Marshal(models.ServerMessage{Type: "ROOM_LEFT", Timestamp: nowMs()})
+	c.Push(payload)
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		c.Close()
+	}()
 }
 
 // HandleChat 广播一条桌内聊天；聊天不限制对局阶段，等待和游戏中都能发言。
-func (r *Room) HandleChat(c *Client, m ClientMessage) {
+func (r *Room) HandleChat(c Peer, m models.ClientMessage) {
 	// 以连接自身的身份发言，忽略客户端自报的 playerId，避免冒名顶替
-	player, ok := r.Players[c.PlayerID]
+	player, ok := r.Players[c.PlayerID()]
 	if !ok {
 		r.SendError(c, "你不在当前牌桌")
 		return
@@ -388,7 +318,7 @@ func (r *Room) HandleChat(c *Client, m ClientMessage) {
 	if runes := []rune(text); len(runes) > MaxChatLength {
 		text = string(runes[:MaxChatLength])
 	}
-	r.broadcastChat(ChatMessage{
+	r.broadcastChat(models.ChatMessage{
 		Kind:     "chat",
 		PlayerID: player.ID,
 		Name:     player.Name,
@@ -401,10 +331,12 @@ func (r *Room) startGame() {
 		p.Score = 0
 		p.HasBanked = false
 	}
-	r.State.Phase = StateRolling
+	r.State.Phase = models.PhaseRolling
 	r.State.CurrentTurn = 0
 	r.State.TurnScore = 0
 	r.State.LockedDice = []int{}
+	r.State.Selection = []int{}
+	r.State.RollDice = 0
 	r.State.RollCount = 0
 	r.State.Winner = ""
 	r.State.KeptThisRoll = false
@@ -413,8 +345,8 @@ func (r *Room) startGame() {
 	r.doRoll()
 }
 
-func (r *Room) HandleReady(c *Client, m ClientMessage) {
-	if r.State.Phase != StateWaiting {
+func (r *Room) HandleReady(c Peer, m models.ClientMessage) {
+	if r.State.Phase != models.PhaseWaiting {
 		r.SendError(c, "当前不能准备")
 		return
 	}
@@ -467,18 +399,20 @@ func (r *Room) doRoll() {
 	r.State.Trajectory = nil
 	r.State.TrajectoryDice = 0
 	r.State.StepsPerFrame = 0
+	r.State.Selection = []int{}
+	r.State.RollDice = remaining
 	r.State.RollCount++
 	r.State.Farkled = false
 	r.State.LastBanked = 0
 	r.State.KeptThisRoll = false
-	r.State.Phase = StateRolling
+	r.State.Phase = models.PhaseRolling
 	r.State.RollID = gen
 	r.State.AnimatingTill = nowMs() + RollTimeoutMillis
 	r.updateStatus()
 
 	// roll 字段携带 [骰子数量, 随机种子]；种子让全桌客户端跑出一致的物理结果
 	seed := int(rollDie()*1000000) + int(nowMs()%1000000)
-	payload, _ := json.Marshal(ServerMessage{
+	payload, _ := json.Marshal(models.ServerMessage{
 		Type:      "ROLL_REQUESTED",
 		Roll:      []int{remaining, seed},
 		State:     &r.State,
@@ -488,7 +422,7 @@ func (r *Room) doRoll() {
 
 	// 兜底：客户端迟迟不上报（掉线/异常）时服务端自己掷
 	r.After(RollTimeoutMillis*time.Millisecond, func() {
-		if r.gen != gen || r.State.Phase != StateRolling {
+		if r.gen != gen || r.State.Phase != models.PhaseRolling {
 			return
 		}
 		fallback := make([]int, remaining)
@@ -502,13 +436,13 @@ func (r *Room) doRoll() {
 // applyRoll 结算一次投掷（来自客户端上报或服务端兜底）
 func (r *Room) applyRoll(dice []int) {
 	r.State.DiceValues = dice
-	isFarkle := bestScore(dice) == 0
+	isFarkle := game.BestScore(dice) == 0
 	gen := r.gen
 
 	if isFarkle {
 		r.State.TurnScore = 0
 		r.State.Farkled = true
-		r.State.Phase = StateTurnEnd
+		r.State.Phase = models.PhaseTurnEnd
 		r.BroadcastState()
 		r.After(1500*time.Millisecond, func() {
 			if r.gen != gen {
@@ -517,18 +451,18 @@ func (r *Room) applyRoll(dice []int) {
 			r.nextTurn()
 		})
 	} else {
-		r.State.Phase = StateScoring
+		r.State.Phase = models.PhaseScoring
 		r.BroadcastState()
 	}
 }
 
 // HandleRollResult 接收投掷者客户端上报的物理动画结果
-func (r *Room) HandleRollResult(c *Client, m ClientMessage) {
+func (r *Room) HandleRollResult(c Peer, m models.ClientMessage) {
 	if !r.isCurrentPlayer(m.PlayerID) {
 		r.SendError(c, "还没轮到你")
 		return
 	}
-	if r.State.Phase != StateRolling {
+	if r.State.Phase != models.PhaseRolling {
 		r.SendError(c, "当前不在投掷阶段")
 		return
 	}
@@ -553,8 +487,8 @@ func (r *Room) HandleRollResult(c *Client, m ClientMessage) {
 	}
 	// 关键帧轨迹：结构校验通过才接受（每帧 = 本次投掷的骰子数 × 7 个数）。
 	// 注意步长必须按实际骰子数算：锁骰后只剩 N 颗，帧长度是 N×7 而不是固定的 42。
-	stride := expected * TrajectoryNumbersPerDie
-	if n := len(m.Trajectory); n > 0 && n%stride == 0 && n/stride <= MaxTrajectoryFrames &&
+	stride := expected * models.TrajectoryNumbersPerDie
+	if n := len(m.Trajectory); n > 0 && n%stride == 0 && n/stride <= models.MaxTrajectoryFrames &&
 		m.StepsPerFrame >= 1 && m.StepsPerFrame <= 60 {
 		r.State.Trajectory = m.Trajectory
 		r.State.TrajectoryDice = expected
@@ -563,18 +497,17 @@ func (r *Room) HandleRollResult(c *Client, m ClientMessage) {
 	r.applyRoll(m.Roll)
 }
 
-func (r *Room) HandleKeep(c *Client, m ClientMessage) {
-	if r.State.Phase != StateScoring {
-		r.SendError(c, "现在不能锁定骰子")
-		return
+// validateKeep 校验一次锁定，返回得分、扣除所选后的散骰池与错误文案（空串表示合法）。
+// 只读校验，不改动房间状态，便于「选择并结束回合」先判断能不能入库。
+func (r *Room) validateKeep(m models.ClientMessage) (int, []int, string) {
+	if r.State.Phase != models.PhaseScoring {
+		return 0, nil, "现在不能锁定骰子"
 	}
 	if !r.isCurrentPlayer(m.PlayerID) {
-		r.SendError(c, "还没轮到你")
-		return
+		return 0, nil, "还没轮到你"
 	}
 	if len(m.Keep) == 0 {
-		r.SendError(c, "请至少选择一颗得分骰")
-		return
+		return 0, nil, "请至少选择一颗得分骰"
 	}
 	// 验证所选骰子确实存在于散骰中
 	pool := make([]int, len(r.State.DiceValues))
@@ -589,25 +522,83 @@ func (r *Room) HandleKeep(c *Client, m ClientMessage) {
 			}
 		}
 		if !found {
-			r.SendError(c, "所选骰子不存在")
-			return
+			return 0, nil, "所选骰子不存在"
 		}
 	}
-	score, ok := validSelection(m.Keep)
+	score, ok := game.ValidSelection(m.Keep)
 	if !ok {
-		r.SendError(c, "所选骰子组合不得分")
-		return
+		return 0, nil, "所选骰子组合不得分"
+	}
+	return score, pool, ""
+}
+
+// applyKeep 应用一次锁定（扣散骰池、累加回合分）。校验失败时已回错误，返回 false。
+func (r *Room) applyKeep(c Peer, m models.ClientMessage) bool {
+	score, pool, errMsg := r.validateKeep(m)
+	if errMsg != "" {
+		r.SendError(c, errMsg)
+		return false
 	}
 	r.State.TurnScore += score
 	r.State.LockedDice = append(r.State.LockedDice, m.Keep...)
 	r.State.DiceValues = pool
 	r.State.KeptThisRoll = true
-	r.State.Phase = StateScoring
+	r.State.Selection = []int{}
+	r.State.Phase = models.PhaseScoring
+	return true
+}
+
+// HandleKeep 只锁定骰子（保留兼容：新前端用「选择并投掷/结束回合」两个动作）
+func (r *Room) HandleKeep(c Peer, m models.ClientMessage) {
+	if !r.applyKeep(c, m) {
+		return
+	}
 	r.BroadcastState()
 }
 
-func (r *Room) HandleRollAgain(c *Client, m ClientMessage) {
-	if r.State.Phase != StateScoring {
+// HandleSelect 广播当前玩家选中的骰子下标，让对手也能看到他在选什么。
+// 这里只做下标合法性校验，真正的得分校验在 applyKeep 里。
+func (r *Room) HandleSelect(c Peer, m models.ClientMessage) {
+	// 不是当前玩家/不在可选阶段时静默忽略，避免误触刷出一堆错误提示
+	if !r.isCurrentPlayer(m.PlayerID) {
+		return
+	}
+	if r.State.Phase != models.PhaseScoring && r.State.Phase != models.PhaseRolling {
+		return
+	}
+	rollDice := r.State.RollDice
+	if rollDice <= 0 {
+		rollDice = len(r.State.DiceValues)
+	}
+	seen := make(map[int]bool, len(m.Select))
+	selection := make([]int, 0, len(m.Select))
+	for _, idx := range m.Select {
+		if idx < 0 || idx >= rollDice || seen[idx] {
+			continue
+		}
+		seen[idx] = true
+		selection = append(selection, idx)
+	}
+	sort.Ints(selection)
+	r.State.Selection = selection
+
+	payload, err := json.Marshal(models.ServerMessage{
+		Type:      "SELECTION",
+		Selection: selection,
+		RollID:    r.State.RollID,
+		Timestamp: nowMs(),
+	})
+	if err != nil {
+		return
+	}
+	select {
+	case r.Broadcast <- payload:
+	default:
+	}
+}
+
+func (r *Room) HandleRollAgain(c Peer, m models.ClientMessage) {
+	if r.State.Phase != models.PhaseScoring {
 		r.SendError(c, "现在不能掷骰")
 		return
 	}
@@ -624,22 +615,10 @@ func (r *Room) HandleRollAgain(c *Client, m ClientMessage) {
 	r.doRoll()
 }
 
-func (r *Room) HandleBank(c *Client, m ClientMessage) {
-	if r.State.Phase != StateScoring {
-		r.SendError(c, "现在不能入库")
-		return
-	}
-	if !r.isCurrentPlayer(m.PlayerID) {
-		r.SendError(c, "还没轮到你")
-		return
-	}
-	// 与继续投掷一致：每次投掷都必须先锁定得分骰，再决定继续或入库。
-	if !r.State.KeptThisRoll {
-		r.SendError(c, "请先锁定至少一颗得分骰子，再入库")
-		return
-	}
+// applyBank 把当前回合分入库并推进回合
+func (r *Room) applyBank(c Peer, m models.ClientMessage) {
 	p := r.Players[m.PlayerID]
-	if !p.HasBanked && r.State.TurnScore < MinBankScore {
+	if !p.HasBanked && r.State.TurnScore < game.MinBankScore {
 		r.SendError(c, "首次入库至少需要 300 分")
 		return
 	}
@@ -647,9 +626,10 @@ func (r *Room) HandleBank(c *Client, m ClientMessage) {
 	p.HasBanked = true
 	r.State.LastBanked = r.State.TurnScore
 	r.State.TurnScore = 0
-	r.State.Phase = StateTurnEnd
-	if p.Score >= TargetScore {
-		r.State.Phase = StateGameOver
+	r.State.Selection = []int{}
+	r.State.Phase = models.PhaseTurnEnd
+	if p.Score >= game.TargetScore {
+		r.State.Phase = models.PhaseGameOver
 		r.State.Winner = p.Name
 		r.State.RematchReady = []string{}
 		r.BroadcastState()
@@ -665,8 +645,52 @@ func (r *Room) HandleBank(c *Client, m ClientMessage) {
 	})
 }
 
-func (r *Room) HandleRematchReady(c *Client, m ClientMessage) {
-	if r.State.Phase != StateGameOver {
+// HandleKeepAndRoll 「选择并投掷」：锁定所选骰子后立刻投掷剩下的骰子
+func (r *Room) HandleKeepAndRoll(c Peer, m models.ClientMessage) {
+	if !r.applyKeep(c, m) {
+		return
+	}
+	r.doRoll()
+}
+
+// HandleKeepAndBank 「选择并结束回合」：锁定所选骰子后把回合分入库
+func (r *Room) HandleKeepAndBank(c Peer, m models.ClientMessage) {
+	// 先做只读校验：入库不满足条件时不能把骰子白白扣掉
+	score, _, errMsg := r.validateKeep(m)
+	if errMsg != "" {
+		r.SendError(c, errMsg)
+		return
+	}
+	p := r.Players[m.PlayerID]
+	if !p.HasBanked && r.State.TurnScore+score < game.MinBankScore {
+		r.SendError(c, "首次入库至少需要 300 分")
+		return
+	}
+	if !r.applyKeep(c, m) {
+		return
+	}
+	r.applyBank(c, m)
+}
+
+func (r *Room) HandleBank(c Peer, m models.ClientMessage) {
+	if r.State.Phase != models.PhaseScoring {
+		r.SendError(c, "现在不能入库")
+		return
+	}
+	if !r.isCurrentPlayer(m.PlayerID) {
+		r.SendError(c, "还没轮到你")
+		return
+	}
+	// 与继续投掷一致：每次投掷都必须先锁定得分骰，再决定继续或入库。
+	if !r.State.KeptThisRoll {
+		r.SendError(c, "请先锁定至少一颗得分骰子，再入库")
+		return
+	}
+	r.applyBank(c, m)
+}
+
+func (r *Room) HandleRematchReady(c Peer, m models.ClientMessage) {
+	if r.State.Phase != models.PhaseGameOver {
 		r.SendError(c, "对局尚未结束")
 		return
 	}
@@ -681,7 +705,11 @@ func (r *Room) HandleRematchReady(c *Client, m ClientMessage) {
 	}
 	r.State.RematchReady = append(r.State.RematchReady, m.PlayerID)
 	if len(r.Players) >= MinPlayersToStart && len(r.State.RematchReady) == len(r.Players) {
+		// 「继续游戏」等价于双方再次准备：两人都点过之后直接开新局，
+		// 不再回到等待房间让两人重新点一次准备。
 		r.resetToWaiting()
+		r.startGame()
+		return
 	}
 	r.BroadcastState()
 }
@@ -696,7 +724,7 @@ func (r *Room) nextTurn() {
 	r.State.LockedDice = []int{}
 	r.State.DiceValues = []int{}
 	r.State.RollCount = 0
-	r.State.Phase = StateRolling
+	r.State.Phase = models.PhaseRolling
 	r.doRoll()
 }
 

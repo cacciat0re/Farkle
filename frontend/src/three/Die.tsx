@@ -1,11 +1,12 @@
-import { memo, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef } from 'react'
 import * as THREE from 'three'
 import type { ThreeEvent } from '@react-three/fiber'
 import { createDiceFaceTexture } from './textures'
 import { useTrajectory } from './TrajectoryPlayer'
 import { useGameStore } from '../store'
+import { DIE_SIZE, DIE_STASH } from '../game/layout'
 
-const DIE = 0.48 // 骰子边长，需与 trajectory.ts 保持一致
+const DIE = DIE_SIZE
 
 // BoxGeometry 材质面顺序：[+x, -x, +y, -y, +z, -z]
 // 约定：右3 左4 上1 下6 前2 后5（对面之和为 7）
@@ -20,7 +21,6 @@ interface DieProps {
   stepsPerFrame: number
   playing: boolean
   selectable: boolean
-  highlighted: boolean
   hidden: boolean
 }
 
@@ -35,11 +35,9 @@ export const Die = memo(function Die({
   stepsPerFrame,
   playing,
   selectable,
-  highlighted,
   hidden,
 }: DieProps) {
   const group = useRef<THREE.Group>(null)
-  const [hovered, setHovered] = useState(false)
   const toggleSelect = useGameStore((s) => s.toggleSelect)
 
   const materials = useMemo(
@@ -58,19 +56,27 @@ export const Die = memo(function Die({
 
   useTrajectory(group, frames, stride, stepsPerFrame, index, playing)
 
-  const emissive = highlighted ? '#7a5cff' : hovered && selectable ? '#3d5a80' : '#000000'
-  const emissiveIntensity = highlighted ? 0.55 : hovered && selectable ? 0.25 : 0
+  // 本轮还没有轨迹（等待中 / 刚换回合 / 刚点了继续投掷）时把骰子收回桌面下方，
+  // 否则上一轮的骰子会留在桌上，看起来像"没刷新"
+  useEffect(() => {
+    const obj = group.current
+    if (!obj || frames) return
+    obj.position.set(DIE_STASH[0], DIE_STASH[1], DIE_STASH[2])
+  }, [frames])
+
+  useEffect(
+    () => () => {
+      document.body.style.cursor = ''
+    },
+    [],
+  )
 
   return (
     <group
       ref={group}
       visible={!hidden}
-      // 没有轨迹时也摆在托盘里可见（避免"一颗骰子都没有"）
-      position={[
-        ((index % 3) - 1) * 1.6,
-        DIE / 2,
-        (Math.floor(index / 3) - 0.5) * 1.6,
-      ]}
+      // 初始就收在桌面下方；有轨迹后由 useTrajectory 接管位姿
+      position={DIE_STASH}
     >
       <mesh
         castShadow
@@ -83,27 +89,17 @@ export const Die = memo(function Die({
         onPointerOver={(e: ThreeEvent<PointerEvent>) => {
           if (selectable) {
             e.stopPropagation()
-            setHovered(true)
+            document.body.style.cursor = 'pointer'
           }
         }}
-        onPointerOut={() => setHovered(false)}
+        onPointerOut={() => {
+          document.body.style.cursor = ''
+        }}
       >
         <boxGeometry args={[DIE, DIE, DIE]} />
         {materials.map((m, i) => (
           <primitive key={i} object={m} attach={`material-${i}`} />
         ))}
-        {/* 选中高亮覆盖层 */}
-        <mesh scale={1.02}>
-          <boxGeometry args={[DIE, DIE, DIE]} />
-          <meshStandardMaterial
-            color="#000000"
-            emissive={emissive}
-            emissiveIntensity={emissiveIntensity}
-            transparent
-            opacity={highlighted ? 0.35 : 0.2}
-            depthWrite={false}
-          />
-        </mesh>
       </mesh>
     </group>
   )

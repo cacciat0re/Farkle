@@ -1,0 +1,11 @@
+{
+  "name": "farkle-e2e",
+  "private": true,
+  "scripts": {
+    "protocol": "node e2e_test.js",
+    "turns": "node e2e_turns_test.js"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}

@@ -62,38 +62,74 @@ body,
 
 .scoreboard {
   display: flex;
-  gap: 10px;
-  padding: 10px 14px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 16px 12px;
   align-self: center;
-  flex-wrap: wrap;
+  min-width: 320px;
+  /* 和聊天框同一套半透明底，避免浅色羊皮纸在暗色桌面上太抢眼 */
+  background: rgba(26, 15, 7, 0.72);
+  border: 1px solid rgba(201, 150, 46, 0.45);
+  border-radius: 8px;
+  color: #f0e2c4;
+}
+
+.score-goal {
+  text-align: center;
+  font-size: 12px;
+  letter-spacing: 0;
+  opacity: 0.75;
+  text-transform: uppercase;
+}
+
+.score-columns {
+  display: flex;
+  gap: 10px;
   justify-content: center;
 }
 
-.player-chip {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  min-width: 92px;
-  padding: 6px 12px;
+.score-col {
+  flex: 1 1 0;
+  min-width: 132px;
+  padding: 6px 10px 8px;
   border-radius: 8px;
   border: 2px solid transparent;
   transition: all 0.25s;
 }
 
-.player-chip.active {
+.score-col.active {
   border-color: var(--gold);
   background: rgba(201, 150, 46, 0.18);
   box-shadow: 0 0 14px rgba(201, 150, 46, 0.45);
 }
 
-.pname {
+.score-name {
+  text-align: center;
   font-weight: bold;
-  font-size: 15px;
+  font-size: 14px;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.pscore {
-  font-size: 20px;
+.score-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  opacity: 0.9;
+}
+
+.score-row b {
+  font-size: 17px;
   font-variant-numeric: tabular-nums;
+}
+
+.score-col.active .score-row b {
+  color: var(--gold);
 }
 
 /* ---------- 横幅 ---------- */

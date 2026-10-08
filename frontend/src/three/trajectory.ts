@@ -1,18 +1,25 @@
 import * as THREE from 'three'
 import * as RAPIERImport from '@dimforge/rapier3d-compat'
+import { DIE_SIZE } from '../game/layout'
 
 /**
- * @react-three/rapier 已经初始化过同一份 wasm。这里自己再 init 一次可能永远不 resolve，
- * 所以 Scene 挂载时会把它 context 里的 rapier 模块交进来，直接复用已初始化的实例。
+ * 离线预演用的 rapier wasm：懒加载并只初始化一次。
+ * 场景里不再需要物理世界（骰子完全由关键帧驱动），所以这里自己负责 init。
  */
-// eslint 层面允许 any：@react-three/rapier 暴露的 rapier 模块类型与直接导入并不完全一致
-let RAPIER: any = RAPIERImport
-export function setRapierModule(mod: any) {
-  RAPIER = mod
+let rapierReady: Promise<typeof RAPIERImport> | null = null
+
+function loadRapier(): Promise<typeof RAPIERImport> {
+  if (!rapierReady) {
+    // compat 版需要先 init 才能创建 World / ColliderDesc
+    rapierReady = (RAPIERImport as unknown as { init: () => Promise<void> })
+      .init()
+      .then(() => RAPIERImport)
+  }
+  return rapierReady
 }
 
 // 与场景保持一致的常量
-const DIE = 0.48
+const DIE = DIE_SIZE
 const DIE_HALF = DIE / 2
 export const PHYSICS_DT = 1 / 60
 
@@ -90,6 +97,7 @@ export async function precomputeRoll(
   count: number,
   tray: { x: number; z: number },
 ): Promise<PrecomputedRoll> {
+  const RAPIER: any = await loadRapier()
   const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 })
 
   // 地面（顶面 y = 0）与四面空气墙，和场景里的托盘边界一致

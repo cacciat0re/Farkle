@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useGameStore, useIsMyTurn } from '../store'
-import { scoreFull } from '../game/scoring'
+import { MIN_BANK_SCORE, TARGET_SCORE, scoreFull } from '../game/scoring'
 import { Chat } from './Chat'
 
 export function HUD() {
@@ -10,14 +10,12 @@ export function HUD() {
   const error = useGameStore((s) => s.error)
   const isMyTurn = useIsMyTurn()
   const playerReady = useGameStore((s) => s.playerReady)
-  const rollDice = useGameStore((s) => s.rollDice)
-  const keepSelected = useGameStore((s) => s.keepSelected)
-  const bank = useGameStore((s) => s.bank)
+  const keepAndRoll = useGameStore((s) => s.keepAndRoll)
+  const keepAndBank = useGameStore((s) => s.keepAndBank)
   const rematchReady = useGameStore((s) => s.rematchReady)
   const leaveTable = useGameStore((s) => s.leaveTable)
   const joinedAt = useGameStore((s) => s.joinedAt)
   const leaving = useGameStore((s) => s.leaving)
-  const clearSelection = useGameStore((s) => s.clearSelection)
   const dismissError = useGameStore((s) => s.dismissError)
   const settledValues = useGameStore((s) => s.settledValues)
   const [clock, setClock] = useState(() => Date.now())
@@ -37,6 +35,12 @@ export function HUD() {
   const [selectedScore, selectedIsValid] = scoreFull(selectedValues as number[])
   const hasSelection = selectedValues.length > 0
   const currentPlayer = state.players[state.currentTurn]
+  // 对手的选择同样通过服务端广播过来，记分板两边都能看到
+  const shownSelection = state.selection ?? []
+  const shownValues = shownSelection
+    .map((i) => settledValues[i])
+    .filter((v): v is number => v !== null && v !== undefined)
+  const [shownScore] = scoreFull(shownValues)
   const animating = state.animatingTill > clock
   const scoring = state.phase === 'scoring' && isMyTurn
   const myId = useGameStore.getState().myId
@@ -47,24 +51,42 @@ export function HUD() {
   const leaveElapsed = joinedAt === null ? 0 : clock - joinedAt
   const canLeave = leaveElapsed >= 10000
   const leaveSeconds = Math.max(0, 10 - Math.floor(leaveElapsed / 1000))
+  // 首次入库有 300 分门槛：没到门槛就别让按钮点下去，避免服务端拒绝
+  const projectedTurnScore = state.turnScore + (hasSelection && selectedIsValid ? selectedScore : 0)
+  const canBank = currentPlayer?.hasBanked || projectedTurnScore >= MIN_BANK_SCORE
 
   return (
     <div className="hud">
       <Chat />
 
       {/* 顶部：玩家计分板 */}
-      <div className="scoreboard parchment">
-        {state.players.map((p, i) => (
-          <div
-            key={p.id}
-            className={`player-chip ${i === state.currentTurn ? 'active' : ''} ${
-              p.id === useGameStore.getState().myId ? 'me' : ''
-            }`}
-          >
-            <span className="pname">{p.name}</span>
-            <span className="pscore">{p.score.toLocaleString()}</span>
-          </div>
-        ))}
+      <div className="scoreboard">
+        <div className="score-goal">目标 {TARGET_SCORE.toLocaleString()}</div>
+        <div className="score-columns">
+          {state.players.map((p, i) => {
+            const active = i === state.currentTurn
+            return (
+              <div
+                key={p.id}
+                className={`score-col ${active ? 'active' : ''} ${p.id === myId ? 'me' : ''}`}
+              >
+                <div className="score-name">{p.name}</div>
+                <div className="score-row">
+                  <span>总分</span>
+                  <b>{p.score.toLocaleString()}</b>
+                </div>
+                <div className="score-row">
+                  <span>本轮</span>
+                  <b>{active ? state.turnScore.toLocaleString() : 0}</b>
+                </div>
+                <div className="score-row">
+                  <span>选择</span>
+                  <b>{active ? shownScore.toLocaleString() : 0}</b>
+                </div>
+              </div>
+            )
+          })}
+        </div>
       </div>
 
       {/* 回合信息 */}
@@ -101,32 +123,19 @@ export function HUD() {
 
         {scoring && (
           <>
-            <div className="turn-score">
-              回合分 <b>{state.turnScore}</b>
-              {hasSelection && selectedIsValid && <span className="sel-preview"> +{selectedScore}</span>}
-            </div>
-            {selected.length > 0 && (
-              <button className="btn" onClick={clearSelection}>
-                取消选择
-              </button>
-            )}
             <button
               className="btn primary"
               disabled={!hasSelection || !selectedIsValid}
-              onClick={keepSelected}
+              onClick={keepAndRoll}
             >
-              锁定所选{hasSelection && selectedIsValid ? `（+${selectedScore}）` : ''}
+              选择并投掷{hasSelection && selectedIsValid ? `（+${selectedScore}）` : ''}
             </button>
-            {/* 必须先锁定本轮的得分骰；有未锁定的选择时也不允许直接重掷 */}
             <button
-              className="btn"
-              disabled={!state.keptThisRoll || selected.length > 0}
-              onClick={rollDice}
+              className="btn gold"
+              disabled={!hasSelection || !selectedIsValid || !canBank}
+              onClick={keepAndBank}
             >
-              继续掷骰
-            </button>
-            <button className="btn gold" disabled={!state.keptThisRoll} onClick={bank}>
-              入库（{state.turnScore}）
+              选择并结束回合{hasSelection && selectedIsValid ? `（+${selectedScore}）` : ''}
             </button>
           </>
         )}

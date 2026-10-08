@@ -1,7 +1,8 @@
 // 多回合顺序稳定性测试（新协议）：node e2e_turns_test.js
 const WebSocket = require('ws')
 const room = 'butter'
-const url = `ws://localhost:8080/ws/${room}`
+const baseUrl = process.env.FARKLE_WS_URL || 'ws://localhost:8086'
+const url = `${baseUrl}/ws/${room}`
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const send = (c, msg) => c.ws.send(JSON.stringify(msg))
 

@@ -1,26 +1,27 @@
-package main
+package services
 
 import (
 	"encoding/json"
 	"sync"
+
+	"farkle-server/config"
+	"farkle-server/models"
 )
 
-// Hub 管理所有活跃桌子（房间）
+// Hub 管理所有活跃桌子（房间）和大厅订阅者。
 type Hub struct {
 	mu           sync.RWMutex
 	Rooms        map[string]*Room
-	Config       *Config
-	DB           *DB
+	Config       *config.Config
 	lobbyMu      sync.Mutex
-	lobbyClients map[*LobbyClient]struct{}
+	lobbyClients map[LobbyPeer]struct{}
 }
 
-func NewHub(cfg *Config, db *DB) *Hub {
+func NewHub(cfg *config.Config) *Hub {
 	h := &Hub{
 		Rooms:        make(map[string]*Room),
 		Config:       cfg,
-		DB:           db,
-		lobbyClients: make(map[*LobbyClient]struct{}),
+		lobbyClients: make(map[LobbyPeer]struct{}),
 	}
 	// 按配置预热所有桌子（服务器满载 = 配置中的桌子数）
 	for _, t := range cfg.Tables {
@@ -37,30 +38,15 @@ func (h *Hub) GetRoom(id string) *Room {
 	return h.Rooms[id]
 }
 
-// TableStatus 大厅接口返回的桌子状态
-type TableStatus struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	MaxPlayers int    `json:"maxPlayers"`
-	Players    int    `json:"players"`
-	InGame     bool   `json:"inGame"`
-}
-
-type LobbyMessage struct {
-	Type      string        `json:"type"`
-	Tables    []TableStatus `json:"tables"`
-	Timestamp int64         `json:"timestamp"`
-}
-
 // ListTables 返回所有桌子的实时状态（固定集合，不会动态增删）
-func (h *Hub) ListTables() []TableStatus {
+func (h *Hub) ListTables() []models.TableStatus {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	status := make([]TableStatus, 0, len(h.Config.Tables))
+	status := make([]models.TableStatus, 0, len(h.Config.Tables))
 	for _, t := range h.Config.Tables {
 		room := h.Rooms[t.ID]
 		players, inGame := room.Status()
-		status = append(status, TableStatus{
+		status = append(status, models.TableStatus{
 			ID:         t.ID,
 			Name:       t.Name,
 			MaxPlayers: t.MaxPlayers,
@@ -71,25 +57,25 @@ func (h *Hub) ListTables() []TableStatus {
 	return status
 }
 
-func (h *Hub) RegisterLobby(c *LobbyClient) {
+func (h *Hub) RegisterLobby(c LobbyPeer) {
 	h.lobbyMu.Lock()
 	h.lobbyClients[c] = struct{}{}
 	h.lobbyMu.Unlock()
 	h.BroadcastTables()
 }
 
-func (h *Hub) UnregisterLobby(c *LobbyClient) {
+func (h *Hub) UnregisterLobby(c LobbyPeer) {
 	h.lobbyMu.Lock()
 	defer h.lobbyMu.Unlock()
 	if _, ok := h.lobbyClients[c]; ok {
 		delete(h.lobbyClients, c)
-		close(c.Send)
+		c.Close()
 	}
 }
 
 // BroadcastTables 只在桌子人数或对局状态变化时推送，不做定时轮询。
 func (h *Hub) BroadcastTables() {
-	payload, err := json.Marshal(LobbyMessage{
+	payload, err := json.Marshal(models.LobbyMessage{
 		Type:      "TABLE_STATUS",
 		Tables:    h.ListTables(),
 		Timestamp: nowMs(),
@@ -101,11 +87,9 @@ func (h *Hub) BroadcastTables() {
 	h.lobbyMu.Lock()
 	defer h.lobbyMu.Unlock()
 	for c := range h.lobbyClients {
-		select {
-		case c.Send <- payload:
-		default:
+		if !c.Push(payload) {
 			delete(h.lobbyClients, c)
-			close(c.Send)
+			c.Close()
 		}
 	}
 }

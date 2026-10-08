@@ -3,6 +3,14 @@
 database:
   dsn: "host=localhost user=postgres password=20230612 dbname=farkle port=5432 sslmode=disable"
 
+db:
+  dialect: postgres
+  host: 5432
+  port:
+  username: postgres
+  password:
+  name: farkle
+
 server:
   addr: ":8086"
 

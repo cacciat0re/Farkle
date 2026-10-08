@@ -1,4 +1,7 @@
 // Farkle 计分规则的客户端镜像（须与服务端 game.go 保持一致）
+export const TARGET_SCORE = 3000
+export const MIN_BANK_SCORE = 300 // 首次入库最低分，与服务端一致
+
 export interface ScoreResult {
   baseScore: number
   isFarkle: boolean
@@ -15,13 +18,18 @@ export function scoreDice(dice: number[]): ScoreResult {
 
   const nonZero = counts.slice(1).filter((c: number) => c > 0).length
 
-  // 1-6 顺子
-  if (nonZero === 6) return { baseScore: 1500, isFarkle: false }
+  // 顺子 1-6（六颗全不同）
+  if (dice.length === 6 && nonZero === 6) return { baseScore: 1500, isFarkle: false }
 
-  // 三对
-  let pairs = 0
-  for (let i = 1; i <= 6; i++) if (counts[i] === 2) pairs++
-  if (pairs === 3) return { baseScore: 1500, isFarkle: false }
+  // 小顺子（5 颗骰）：1-5 = 500，2-6 = 750
+  if (dice.length === 5 && nonZero === 5) {
+    if (counts[1] === 1 && counts[2] === 1 && counts[3] === 1 && counts[4] === 1 && counts[5] === 1) {
+      return { baseScore: 500, isFarkle: false }
+    }
+    if (counts[2] === 1 && counts[3] === 1 && counts[4] === 1 && counts[5] === 1 && counts[6] === 1) {
+      return { baseScore: 750, isFarkle: false }
+    }
+  }
 
   // 两三条
   let triples = 0
@@ -68,18 +76,16 @@ function specialScore(dice: number[]): number | null {
 
   if (n === 6 && nonZero === 6) return 1500
   if (n === 6) {
-    let pairs = 0
     let triples = 0
     for (let i = 1; i <= 6; i++) {
-      if (counts[i] === 2) pairs++
       if (counts[i] === 3) triples++
     }
-    if (pairs === 3) return 1500
+    // 两三条（3+3）保留；三对已从规则中移除
     if (triples === 2) return 2500
   }
   if (n === 5 && nonZero === 5) {
-    if (counts[1] === 1 && counts[2] === 1 && counts[3] === 1 && counts[4] === 1 && counts[5] === 1) return 1500
-    if (counts[2] === 1 && counts[3] === 1 && counts[4] === 1 && counts[5] === 1 && counts[6] === 1) return 1500
+    if (counts[1] === 1 && counts[2] === 1 && counts[3] === 1 && counts[4] === 1 && counts[5] === 1) return 500
+    if (counts[2] === 1 && counts[3] === 1 && counts[4] === 1 && counts[5] === 1 && counts[6] === 1) return 750
   }
   return null
 }
