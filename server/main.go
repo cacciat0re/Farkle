@@ -29,7 +29,7 @@ func main() {
 		log.Fatalf("加载桌子失败: %v", err)
 	}
 	if len(tables) == 0 {
-		log.Fatal("数据库中没有桌子，请先执行 server/sql/seed_tables.sql")
+		log.Fatal("数据库中没有桌子，请先执行 /test/sql/seed_tables.sql")
 	}
 
 	hub := services.NewHub(tables)

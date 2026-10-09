@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	"farkle-server/models"
-
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -31,8 +29,5 @@ func OpenDB(dsn string) (*DB, error) {
 	sqlDB.SetMaxIdleConns(5)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
-	if err := gdb.AutoMigrate(&models.Table{}, &models.User{}, &models.MatchRecord{}); err != nil {
-		return nil, fmt.Errorf("迁移数据表: %w", err)
-	}
 	return &DB{gdb}, nil
 }
